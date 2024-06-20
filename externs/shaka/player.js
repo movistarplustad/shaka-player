@@ -1149,7 +1149,8 @@ shaka.extern.ManifestConfiguration;
  *   liveSyncMinLatency: number,
  *   liveSyncMinPlaybackRate: number,
  *   allowMediaSourceRecoveries: boolean,
- *   minTimeBetweenRecoveries: number
+ *   minTimeBetweenRecoveries: number,
+ *   shouldFixTimestampOffset: boolean
  * }}
  *
  * @description
@@ -1292,6 +1293,12 @@ shaka.extern.ManifestConfiguration;
  *   The minimum time between recoveries when VIDEO_ERROR is reached, in
  *   seconds.
  *   Defaults to <code>5</code>.
+ * @property {boolean} shouldFixTimestampOffset
+ *   If true, we will try to fix problems when the timestampOffset is less than
+ *   the baseMediaDecodeTime. This only works when the manifest is DASH with
+ *   MP4 segments.
+ *   Defaults to <code>false</code> except on Tizen, WebOS whose default value
+ *   is <code>true</code>.
  * @exportDoc
  */
 shaka.extern.StreamingConfiguration;

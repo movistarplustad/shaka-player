@@ -493,7 +493,9 @@ shakaDemo.Config = class {
             'streaming.ignoreTextStreamFailures')
         .addBoolInput_('Stall Detector Enabled', 'streaming.stallEnabled')
         .addBoolInput_('Use native HLS on Safari',
-            'streaming.useNativeHlsOnSafari');
+            'streaming.useNativeHlsOnSafari')
+        .addBoolInput_('Should fix timestampOffset',
+            'streaming.shouldFixTimestampOffset');
     this.addRetrySection_('streaming', 'Streaming Retry Parameters');
   }
 
