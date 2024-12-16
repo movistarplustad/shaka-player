@@ -621,6 +621,7 @@ shakaAssets.testAssets = [
       /* iconUri= */ 'https://storage.googleapis.com/shaka-asset-icons/shaka.png',
       /* manifestUri= */ 'https://storage.googleapis.com/shaka-live-assets/player-source.mpd',
       /* source= */ shakaAssets.Source.SHAKA)
+      .markAsDisabled()
       .addFeature(shakaAssets.Feature.DASH)
       .addFeature(shakaAssets.Feature.HIGH_DEFINITION)
       .addFeature(shakaAssets.Feature.LIVE)
@@ -633,6 +634,7 @@ shakaAssets.testAssets = [
       /* source= */ shakaAssets.Source.SHAKA)
       .addDescription('A self-indulgent HLS livestream.')
       .markAsFeatured('Shaka Player History')
+      .markAsDisabled()
       .addFeature(shakaAssets.Feature.HIGH_DEFINITION)
       .addFeature(shakaAssets.Feature.HLS)
       .addFeature(shakaAssets.Feature.LIVE)
@@ -708,27 +710,6 @@ shakaAssets.testAssets = [
       .addFeature(shakaAssets.Feature.MULTIPLE_LANGUAGES)
       .addFeature(shakaAssets.Feature.SUBTITLES)
       .addFeature(shakaAssets.Feature.OFFLINE),
-  new ShakaDemoAssetInfo(
-      /* name= */ 'Clear, Live DASH',
-      /* iconUri= */ 'https://storage.googleapis.com/shaka-asset-icons/axinom_test.png',
-      /* manifestUri= */ 'https://akamai-axtest.akamaized.net/routes/lapd-v1-acceptance/www_c4/Manifest.mpd',
-      /* source= */ shakaAssets.Source.AXINOM)
-      // Disabled pending resolution of https://github.com/Axinom/public-test-vectors/issues/16
-      // Disabled pending resolution of https://github.com/Axinom/public-test-vectors/issues/17
-      .markAsDisabled()
-      .addFeature(shakaAssets.Feature.LIVE)
-      .addFeature(shakaAssets.Feature.MP4)
-      .addFeature(shakaAssets.Feature.DASH),
-  new ShakaDemoAssetInfo(
-      /* name= */ 'Clear, Live HLS',
-      /* iconUri= */ 'https://storage.googleapis.com/shaka-asset-icons/axinom_test.png',
-      /* manifestUri= */ 'https://akamai-axtest.akamaized.net/routes/lapd-v1-acceptance/www_c4/Manifest.m3u8',
-      /* source= */ shakaAssets.Source.AXINOM)
-      // Disabled pending resolution of https://github.com/Axinom/public-test-vectors/issues/17
-      .markAsDisabled()
-      .addFeature(shakaAssets.Feature.HLS)
-      .addFeature(shakaAssets.Feature.LIVE)
-      .addFeature(shakaAssets.Feature.MP4),
   new ShakaDemoAssetInfo(
       /* name= */ 'Multi-DRM (CBCS), multi-key',
       /* iconUri= */ 'https://storage.googleapis.com/shaka-asset-icons/tears_of_steel.png',
@@ -1005,17 +986,6 @@ shakaAssets.testAssets = [
       .addFeature(shakaAssets.Feature.MP2TS)
       .addFeature(shakaAssets.Feature.OFFLINE),
   new ShakaDemoAssetInfo(
-      /* name= */ 'Sintel (HLS, TS, 4k)',
-      /* iconUri= */ 'https://storage.googleapis.com/shaka-asset-icons/sintel.png',
-      /* manifestUri= */ 'https://bitdash-a.akamaihd.net/content/sintel/hls/playlist.m3u8',
-      /* source= */ shakaAssets.Source.BITCODIN)
-      // Disabled because the audio playlist ends about 9 seconds early somehow.
-      .markAsDisabled()
-      .addFeature(shakaAssets.Feature.ULTRA_HIGH_DEFINITION)
-      .addFeature(shakaAssets.Feature.HLS)
-      .addFeature(shakaAssets.Feature.MP2TS)
-      .addFeature(shakaAssets.Feature.OFFLINE),
-  new ShakaDemoAssetInfo(
       /* name= */ 'Art of Motion (DASH) (external thumbnails)',
       /* iconUri= */ 'https://storage.googleapis.com/shaka-asset-icons/art_of_motion.png',
       /* manifestUri= */ 'https://cdn.bitmovin.com/content/assets/art-of-motion-dash-hls-progressive/mpds/f08e80da-bf1d-4e3d-8899-f0f6155f6efa.mpd',
@@ -1177,18 +1147,6 @@ shakaAssets.testAssets = [
 
   // TODO: Get actual icon?
   new ShakaDemoAssetInfo(
-      /* name= */ 'live profile',
-      /* iconUri= */ 'https://storage.googleapis.com/shaka-asset-icons/sintel.png',
-      /* manifestUri= */ 'https://download.tsi.telecom-paristech.fr/gpac/DASH_CONFORMANCE/TelecomParisTech/mp4-live/mp4-live-mpd-AV-BS.mpd',
-      /* source= */ shakaAssets.Source.GPAC)
-      // NOTE: Multiple SPS/PPS in init segment, no sample duration
-      // NOTE: Decoder errors on Mac
-      // https://github.com/gpac/gpac/issues/600
-      // https://bugs.webkit.org/show_bug.cgi?id=160459
-      .markAsDisabled()
-      .addFeature(shakaAssets.Feature.DASH)
-      .addFeature(shakaAssets.Feature.MP4),
-  new ShakaDemoAssetInfo(
       /* name= */ 'live profile with five periods',
       /* iconUri= */ 'https://storage.googleapis.com/shaka-asset-icons/gpac_test_pattern.png',
       /* manifestUri= */ 'https://download.tsi.telecom-paristech.fr/gpac/DASH_CONFORMANCE/TelecomParisTech/mp4-live-periods/mp4-live-periods-mpd.mpd',
@@ -1207,18 +1165,6 @@ shakaAssets.testAssets = [
       .addFeature(shakaAssets.Feature.HIGH_DEFINITION)
       .addFeature(shakaAssets.Feature.OFFLINE),
   new ShakaDemoAssetInfo(
-      /* name= */ 'main profile, multiple files',
-      /* iconUri= */ 'https://storage.googleapis.com/shaka-asset-icons/gpac_test_pattern.png',
-      /* manifestUri= */ 'https://download.tsi.telecom-paristech.fr/gpac/DASH_CONFORMANCE/TelecomParisTech/mp4-main-multi/mp4-main-multi-mpd-AV-BS.mpd',
-      /* source= */ shakaAssets.Source.GPAC)
-      // NOTE: Multiple SPS/PPS in init segment, no sample duration
-      // NOTE: Decoder errors on Mac
-      // https://github.com/gpac/gpac/issues/600
-      // https://bugs.webkit.org/show_bug.cgi?id=160459
-      .markAsDisabled()
-      .addFeature(shakaAssets.Feature.DASH)
-      .addFeature(shakaAssets.Feature.MP4),
-  new ShakaDemoAssetInfo(
       /* name= */ 'onDemand profile',
       /* iconUri= */ 'https://storage.googleapis.com/shaka-asset-icons/gpac_test_pattern.png',
       /* manifestUri= */ 'https://download.tsi.telecom-paristech.fr/gpac/DASH_CONFORMANCE/TelecomParisTech/mp4-onDemand/mp4-onDemand-mpd-AV.mpd',
@@ -1227,28 +1173,6 @@ shakaAssets.testAssets = [
       .addFeature(shakaAssets.Feature.MP4)
       .addFeature(shakaAssets.Feature.HIGH_DEFINITION)
       .addFeature(shakaAssets.Feature.OFFLINE),
-  new ShakaDemoAssetInfo(
-      /* name= */ 'main profile, open GOP',
-      /* iconUri= */ 'https://storage.googleapis.com/shaka-asset-icons/gpac_test_pattern.png',
-      /* manifestUri= */ 'https://download.tsi.telecom-paristech.fr/gpac/DASH_CONFORMANCE/TelecomParisTech/mp4-main-ogop/mp4-main-ogop-mpd-AV-BS.mpd',
-      /* source= */ shakaAssets.Source.GPAC)
-      // NOTE: Segments do not start with keyframes
-      // NOTE: Decoder errors on Safari
-      // https://bugs.webkit.org/show_bug.cgi?id=160460
-      .markAsDisabled()
-      .addFeature(shakaAssets.Feature.DASH)
-      .addFeature(shakaAssets.Feature.MP4),
-  new ShakaDemoAssetInfo(
-      /* name= */ 'full profile, gradual decoding refresh',
-      /* iconUri= */ 'https://storage.googleapis.com/shaka-asset-icons/gpac_test_pattern.png',
-      /* manifestUri= */ 'https://download.tsi.telecom-paristech.fr/gpac/DASH_CONFORMANCE/TelecomParisTech/mp4-full-gdr/mp4-full-gdr-mpd-AV-BS.mpd',
-      /* source= */ shakaAssets.Source.GPAC)
-      // NOTE: segments do not start with keyframes
-      // NOTE: Decoder errors on Safari
-      // https://bugs.webkit.org/show_bug.cgi?id=160460
-      .markAsDisabled()
-      .addFeature(shakaAssets.Feature.DASH)
-      .addFeature(shakaAssets.Feature.MP4),
   // End GPAC assets }}}
 
   // Verizon Digital Media Services (VDMS) assets {{{
@@ -1376,7 +1300,7 @@ shakaAssets.testAssets = [
       .addFeature(shakaAssets.Feature.THUMBNAILS),
   new ShakaDemoAssetInfo(
       /* name= */ '3D movie stream',
-      /* iconUri= */ '',
+      /* iconUri= */ 'https://storage.googleapis.com/shaka-asset-icons/prehistoric.png',
       /* manifestUri= */ 'https://devstreaming-cdn.apple.com/videos/streaming/examples/historic_planet_content_2023-10-26-3d-video/main.m3u8',
       /* source= */ shakaAssets.Source.APPLE)
       .addFeature(shakaAssets.Feature.HLS)
@@ -1645,7 +1569,13 @@ shakaAssets.testAssets = [
       .addFeature(shakaAssets.Feature.DASH)
       .addFeature(shakaAssets.Feature.HIGH_DEFINITION)
       .addFeature(shakaAssets.Feature.MP4)
-      .addFeature(shakaAssets.Feature.LIVE),
+      .addFeature(shakaAssets.Feature.LIVE)
+      .addFeature(shakaAssets.Feature.LOW_LATENCY)
+      .setExtraConfig({
+        streaming: {
+          lowLatencyMode: true,
+        },
+      }),
   // }}}
 
   // EZDRM assets {{{
