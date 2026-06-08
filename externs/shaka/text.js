@@ -125,10 +125,14 @@ shaka.extern.TextDisplayer = class {
    *
    * @param {!Array.<!shaka.text.Cue>} cues
    *    Text cues to be appended.
+   * @param {boolean=} keepVisible
+   *    Optional. If true, the displayer should keep already-visible cues
+   *    showing while appending (used for window-first background loading of a
+   *    large single-file TTML). Displayers may ignore it.
    *
    * @exportDoc
    */
-  append(cues) {}
+  append(cues, keepVisible) {}
 
   /**
    * Remove all cues that are fully contained by the given time range (relative

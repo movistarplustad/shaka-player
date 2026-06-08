@@ -700,7 +700,7 @@ describe('MediaSourceEngine', () => {
           ContentType.TEXT, data, reference, fakeStream,
           /* hasClosedCaptions= */ false);
       expect(mockTextEngine.appendBuffer).toHaveBeenCalledWith(
-          data, 0, 10, 'foo://bar');
+          data, 0, 10, 'foo://bar', 0);
     });
 
     it('appends transmuxed data', async () => {
