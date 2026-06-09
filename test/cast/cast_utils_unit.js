@@ -28,6 +28,7 @@ describe('CastUtils', () => {
       'setVideoContainer',
       'getActiveSessionsMetadata',
       'releaseAllMutexes', // Very specific to the inner workings of the player.
+      'setLicenceRequiredCallback', // Takes a callback; not serializable.
 
       // Test helper methods (not @export'd)
       'createDrmEngine',

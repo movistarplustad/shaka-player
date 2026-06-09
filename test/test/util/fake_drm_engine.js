@@ -25,6 +25,10 @@ shaka.test.FakeDrmEngine = class {
     /** @type {!jasmine.Spy} */
     this.configure = jasmine.createSpy('configure');
 
+    /** @type {!jasmine.Spy} */
+    this.setLicenceRequiredCallback =
+        jasmine.createSpy('setLicenceRequiredCallback');
+
     // Because of the |IDestroyable| interface, we need to cast destroy to be
     // a function so that closure will understand that FakeDrmEngine still meets
     // the interface requirements.
