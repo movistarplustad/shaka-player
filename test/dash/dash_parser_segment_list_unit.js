@@ -38,6 +38,62 @@ describe('DashParser SegmentList', () => {
     await Dash.testSegmentIndex(source, references);
   });
 
+  it('carries the default key ID on the init segment', async () => {
+    const source = [
+      '<MPD type="static" mediaPresentationDuration="PT30S"',
+      '    xmlns:cenc="urn:mpeg:cenc:2013">',
+      '  <Period duration="PT30S">',
+      '    <AdaptationSet mimeType="video/mp4">',
+      '      <ContentProtection',
+      '          schemeIdUri="urn:mpeg:dash:mp4protection:2011" value="cenc"',
+      '          cenc:default_KID="DEADBEEF-FEED-BAAD-F00D-000008675309" />',
+      '      <ContentProtection schemeIdUri=',
+      '          "urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed" />',
+      '      <Representation bandwidth="500">',
+      '        <BaseURL>http://example.com</BaseURL>',
+      '        <SegmentList duration="10">',
+      '          <Initialization sourceURL="init.mp4" />',
+      '          <SegmentURL media="s1.mp4" />',
+      '          <SegmentURL media="s2.mp4" />',
+      '          <SegmentURL media="s3.mp4" />',
+      '        </SegmentList>',
+      '      </Representation>',
+      '    </AdaptationSet>',
+      '  </Period>',
+      '</MPD>',
+    ].join('\n');
+
+    const fakeNetEngine = new shaka.test.FakeNetworkingEngine();
+    fakeNetEngine.setResponseText('dummy://foo', source);
+    const parser = shaka.test.Dash.makeDashParser();
+    const playerInterface = {
+      networkingEngine: fakeNetEngine,
+      modifyManifestRequest: (request, manifestInfo) => {},
+      modifySegmentRequest: (request, segmentInfo) => {},
+      filter: (manifest) => Promise.resolve(),
+      makeTextStreamsForClosedCaptions: (manifest) => {},
+      onTimelineRegionAdded: fail,
+      onEvent: fail,
+      onError: fail,
+      isLowLatencyMode: () => false,
+      isAutoLowLatencyMode: () => false,
+      enableLowLatencyMode: () => {},
+      updateDuration: () => {},
+      newDrmInfo: (stream) => {},
+      onManifestUpdated: () => {},
+      getBandwidthEstimate: () => 1e6,
+    };
+
+    const manifest = await parser.start('dummy://foo', playerInterface);
+    const segmentReference = await Dash.getFirstVideoSegmentReference(manifest);
+    const initSegmentReference = segmentReference.initSegmentReference;
+    expect(initSegmentReference.getUris()).toEqual(
+        ['http://example.com/init.mp4']);
+    expect(initSegmentReference.keyIds)
+        .toEqual(['deadbeeffeedbaadf00d000008675309']);
+    parser.stop();
+  });
+
   it('supports single segment', async () => {
     const source = Dash.makeSimpleManifestText([
       '<SegmentList>',

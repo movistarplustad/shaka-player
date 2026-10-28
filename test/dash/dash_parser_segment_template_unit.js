@@ -183,6 +183,123 @@ describe('DashParser SegmentTemplate', () => {
     });
   });
 
+  describe('key IDs on init segments', () => {
+    const kid1 = 'DEADBEEF-FEED-BAAD-F00D-000008675309';
+    const kid2 = 'BAADF00D-FEED-DEAF-BEEF-000004390116';
+    const kid1Hex = 'deadbeeffeedbaadf00d000008675309';
+    const kid2Hex = 'baadf00dfeeddeafbeef000004390116';
+
+    /**
+     * @param {string} kid
+     * @return {string}
+     */
+    function protection(kid) {
+      return [
+        '<ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011"',
+        '    value="cenc" cenc:default_KID="' + kid + '" />',
+        '<ContentProtection',
+        '    schemeIdUri="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed" />',
+      ].join('\n');
+    }
+
+    /**
+     * @param {string} id
+     * @param {number} start
+     * @param {string} adaptationSetLines
+     * @param {string} representationLines
+     * @return {string}
+     */
+    function makePeriod(id, start, adaptationSetLines, representationLines) {
+      return [
+        '  <Period id="' + id + '" start="PT' + start + 'S" duration="PT30S">',
+        '    <AdaptationSet mimeType="video/mp4" codecs="avc1.4d401f">',
+        adaptationSetLines,
+        '      <Representation id="v" bandwidth="500">',
+        '        <BaseURL>http://example.com/' + id + '/</BaseURL>',
+        representationLines,
+        '        <SegmentTemplate media="s$Number$.mp4"',
+        '            initialization="init.mp4" duration="10" />',
+        '      </Representation>',
+        '    </AdaptationSet>',
+        '  </Period>',
+      ].join('\n');
+    }
+
+    /**
+     * @param {!Array.<string>} periods
+     * @return {string}
+     */
+    function makeManifest(periods) {
+      const duration = periods.length * 30;
+      return [
+        '<MPD type="static" mediaPresentationDuration="PT' + duration + 'S"',
+        '    xmlns:cenc="urn:mpeg:cenc:2013">',
+      ].concat(periods, ['</MPD>']).join('\n');
+    }
+
+    it('come from the AdaptationSet default_KID', async () => {
+      const source = makeManifest([makePeriod('1', 0, protection(kid1), '')]);
+      fakeNetEngine.setResponseText('dummy://foo', source);
+
+      const manifest = await parser.start('dummy://foo', playerInterface);
+      const reference = await Dash.getFirstVideoSegmentReference(manifest);
+      expect(reference.initSegmentReference.keyIds).toEqual([kid1Hex]);
+    });
+
+    it('prefer the Representation default_KID', async () => {
+      const source = makeManifest([makePeriod('1', 0, protection(kid1), [
+        '<ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011"',
+        '    value="cenc" cenc:default_KID="' + kid2 + '" />',
+      ].join('\n'))]);
+      fakeNetEngine.setResponseText('dummy://foo', source);
+
+      const manifest = await parser.start('dummy://foo', playerInterface);
+      const reference = await Dash.getFirstVideoSegmentReference(manifest);
+      expect(reference.initSegmentReference.keyIds).toEqual([kid2Hex]);
+    });
+
+    it('are empty for clear content', async () => {
+      const source = makeManifest([makePeriod('1', 0, '', '')]);
+      fakeNetEngine.setResponseText('dummy://foo', source);
+
+      const manifest = await parser.start('dummy://foo', playerInterface);
+      const reference = await Dash.getFirstVideoSegmentReference(manifest);
+      expect(reference.initSegmentReference.keyIds).toEqual([]);
+    });
+
+    it('follow each Period of a combined stream', async () => {
+      const source = makeManifest([
+        makePeriod('1', 0, protection(kid1), ''),
+        makePeriod('2', 30, protection(kid2), ''),
+      ]);
+      fakeNetEngine.setResponseText('dummy://foo', source);
+
+      const manifest = await parser.start('dummy://foo', playerInterface);
+      expect(manifest.variants.length).toBe(1);
+      const video = manifest.variants[0].video;
+      expect(Array.from(video.keyIds)).toEqual([kid1Hex, kid2Hex]);
+      await video.createSegmentIndex();
+      goog.asserts.assert(video.segmentIndex, 'Should have created index');
+
+      const firstPosition = video.segmentIndex.find(0);
+      const secondPosition = video.segmentIndex.find(30);
+      goog.asserts.assert(firstPosition != null && secondPosition != null,
+          'Positions should not be null!');
+      const first = video.segmentIndex.get(firstPosition);
+      const second = video.segmentIndex.get(secondPosition);
+      goog.asserts.assert(first && second, 'References should not be null!');
+      expect(first.initSegmentReference.getUris())
+          .toEqual(['http://example.com/1/init.mp4']);
+      expect(first.initSegmentReference.keyIds).toEqual([kid1Hex]);
+      expect(second.initSegmentReference.getUris())
+          .toEqual(['http://example.com/2/init.mp4']);
+      expect(second.initSegmentReference.keyIds).toEqual([kid2Hex]);
+      expect(shaka.media.InitSegmentReference.equal(
+          first.initSegmentReference, second.initSegmentReference))
+          .toBe(false);
+    });
+  });
+
   describe('index', () => {
     it('basic support', async () => {
       const source = Dash.makeSimpleManifestText([

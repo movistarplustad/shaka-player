@@ -69,6 +69,8 @@ describe('StreamingEngine', () => {
   /** @type {!jasmine.Spy} */
   let onSegmentAppended;
   /** @type {!jasmine.Spy} */
+  let onInitSegmentAppended;
+  /** @type {!jasmine.Spy} */
   let getBandwidthEstimate;
   /** @type {!shaka.media.StreamingEngine} */
   let streamingEngine;
@@ -435,6 +437,7 @@ describe('StreamingEngine', () => {
     onEvent = jasmine.createSpy('onEvent');
     onManifestUpdate = jasmine.createSpy('onManifestUpdate');
     onSegmentAppended = jasmine.createSpy('onSegmentAppended');
+    onInitSegmentAppended = jasmine.createSpy('onInitSegmentAppended');
     beforeAppendSegment = jasmine.createSpy('beforeAppendSegment');
     onMetadata = jasmine.createSpy('onMetadata');
     getBandwidthEstimate = jasmine.createSpy('getBandwidthEstimate');
@@ -466,7 +469,7 @@ describe('StreamingEngine', () => {
       onEvent: Util.spyFunc(onEvent),
       onManifestUpdate: Util.spyFunc(onManifestUpdate),
       onSegmentAppended: Util.spyFunc(onSegmentAppended),
-      onInitSegmentAppended: () => {},
+      onInitSegmentAppended: Util.spyFunc(onInitSegmentAppended),
       beforeAppendSegment: Util.spyFunc(beforeAppendSegment),
       onMetadata: Util.spyFunc(onMetadata),
       disableStream: Util.spyFunc(disableStream),
@@ -3910,6 +3913,40 @@ describe('StreamingEngine', () => {
       // The request should have been aborted.
       expect(isAborted).toBe(true);
     });
+  });
+
+  describe('onInitSegmentAppended', () => {
+    it('is called for each Period before its media segments are appended',
+        async () => {
+          setupVod();
+          mediaSourceEngine = new shaka.test.FakeMediaSourceEngine(segmentData);
+          createStreamingEngine();
+
+          /** @type {!Array.<string>} */
+          const seen = [];
+          onInitSegmentAppended.and.callFake(
+              (position, initSegmentReference) => {
+                const uri = initSegmentReference.getUris()[0];
+                const periodIndex = Number(uri[0]);
+                const type = uri.split('_')[1];
+                // No media segment of that Period has been appended yet.
+                const appended = mediaSourceEngine.segments[type].slice(
+                    periodIndex * 2, periodIndex * 2 + 2);
+                expect(appended).withContext(uri).toEqual([false, false]);
+                seen.push(position + ':' + uri);
+              });
+
+          streamingEngine.switchVariant(variant);
+          streamingEngine.switchTextStream(textStream);
+          await streamingEngine.start();
+          playing = true;
+          await runTest();
+
+          expect(seen).toEqual(jasmine.arrayWithExactContents([
+            '0:0_audio_init', '0:0_video_init',
+            '20:1_audio_init', '20:1_video_init',
+          ]));
+        });
   });
 
   describe('beforeAppendSegment', () => {

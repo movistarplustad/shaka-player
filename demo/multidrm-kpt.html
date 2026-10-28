@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <!-- Shaka Player compiled library: -->
+    <!-- script type="text/javascript" src="https://ajax.googleapis.com/ajax/libs/shaka-player/4.3.5/shaka-player.compiled.js"></script -->
+    <!-- script src="../dist/shaka-player.compiled.debug.js"></script -->
+    <!-- script type="text/javascript" src="https://cdn.jsdelivr.net/npm/shaka-player@4.14.5/dist/shaka-player.compiled.debug.js"></script -->
+    <!-- script type="text/javascript" src="https://cdn.jsdelivr.net/npm/shaka-player@4.7.0/dist/shaka-player.compiled.js"></script -->
+
+    <!-- Closure base: -->
+    <script src="../node_modules/google-closure-library/closure/goog/base.js"></script>
+    <!-- Deps file: -->
+    <script src="../dist/deps.js"></script>
+    <!-- Shaka Player uncompiled library: -->
+    <script src="../shaka-player.uncompiled.js"></script>
+    <!-- Estilos de la UI de Shaka (seek bar, botones, etc.): -->
+    <link rel="stylesheet" href="../dist/controls.css">
+
+
+    <!-- Your application source: -->
+    <script>
+        var manifestUri = 'https://tvela1-dash-movistarplus.emisiondof6.com/manifest.mpd';
+        // mediakind
+        //manifestUri = 'https://test19-dash-movistarplus.emisiondof6.com/manifest.mpd';
+        //manifestUri = 'https://test18-dash-movistarplus.emisiondof6.com/manifest.mpd';
+        //ATEM
+        // Test 01: UID 5121, con 2h10’
+        // Test 02: UID 4924, con 15’
+        manifestUri = 'https://test01-dash-movistarplus.emisiondof6.com/manifest.mpd';
+        // test02 esta entrando por un bucket de certificacion con token de la tcdn a 2 horas.
+        //manifestUri = 'https://test02-dash-movistarplus.emisiondof6.com/manifest.mpd';
+
+        function initApp() {
+            // Install built-in polyfills to patch browser incompatibilities.
+            window.shakaLib = shaka;
+            shaka.polyfill.installAll();
+
+            // Debug logs, when the default of INFO isn't enough:
+            //shaka.log.setLevel(shaka.log.Level.DEBUG);
+
+            // Verbose logs, which can generate a lot of output:
+            //shaka.log.setLevel(shaka.log.Level.V1);
+
+            // Verbose 2, which is extremely noisy:
+            //shaka.log.setLevel(shaka.log.Level.V2);
+
+            // Check to see if the browser supports the basic APIs Shaka needs.
+            if (shaka.Player.isBrowserSupported()) {
+                // Everything looks good!
+                initPlayer();
+
+            } else {
+                // This browser does not have the minimum set of APIs we need.
+                console.error('Browser not supported!');
+            }
+        }
+
+        async function probeSupport() {
+
+            const testKeySystems = [
+                'org.w3.clearkey',
+                'com.widevine.alpha',
+                'com.microsoft.playready',
+                'com.microsoft.playready.recommendation',
+                'com.apple.fps.1_0',
+                'com.apple.fps',
+                'com.adobe.primetime',
+            ];
+
+            const basicVideoCapabilities = [
+                { contentType: 'video/mp4; codecs="avc1.42E01E"' },
+            ];
+
+            const basicConfig = {
+                initDataTypes: ['cenc'],
+                videoCapabilities: basicVideoCapabilities,
+            };
+            const offlineConfig = {
+                videoCapabilities: basicVideoCapabilities,
+                persistentState: 'required',
+                sessionTypes: ['persistent-license'],
+            };
+
+            // Try the offline config first, then fall back to the basic config.
+            const configs = [offlineConfig, basicConfig];
+
+            /** @type {!Map.<string, ?shaka.extern.DrmSupportType>} */
+            const support = new Map();
+
+            const testSystem = async (keySystem) => {
+                try {
+                    // Our Polyfill will reject anything apart com.apple.fps key systems.
+                    // It seems the Safari modern EME API will allow to request a
+                    // MediaKeySystemAccess for the ClearKey CDM, create and update a key
+                    // session but playback will never start
+                    // Safari bug: https://bugs.webkit.org/show_bug.cgi?id=231006
+                    let isSafari = true;
+                    if (keySystem === 'org.w3.clearkey' && isSafari) {
+                        throw new Error('Unsupported keySystem');
+                    }
+
+                    const access = await navigator.requestMediaKeySystemAccess(
+                        keySystem, configs);
+
+                    // Edge doesn't return supported session types, but current versions
+                    // do not support persistent-license.  If sessionTypes is missing,
+                    // assume no support for persistent-license.
+                    // TODO: Polyfill Edge to return known supported session types.
+                    // Edge bug: https://bit.ly/2IeKzho
+                    const sessionTypes = access.getConfiguration().sessionTypes;
+                    let persistentState = sessionTypes ?
+                        sessionTypes.includes('persistent-license') : false;
+
+                    support.set(keySystem, { persistentState: persistentState });
+                    await access.createMediaKeys();
+                } catch (e) {
+                    // Either the request failed or createMediaKeys failed.
+                    // Either way, write null to the support object.
+                    support.set(keySystem, null);
+                }
+            };
+
+            // Test each key system.
+            const tests = testKeySystems.map((keySystem) => testSystem(keySystem));
+            await Promise.all(tests);
+            return asObject(support);
+        }
+        function asObject(map) {
+            const obj = {};
+            map.forEach((value, key) => {
+                obj[key] = value;
+            });
+
+            return obj;
+        }
+        function decodePSSH(pssh) {
+            // Respetar byteOffset: el Uint8Array puede ser un subarray del buffer
+            // subyacente, por lo que hay que usar (buffer, byteOffset, byteLength)
+            let dataView = new DataView(pssh.buffer, pssh.byteOffset, pssh.byteLength);
+            let index = 0;
+
+            // 2️⃣ Leer tamaño del box
+            let boxSize = dataView.getUint32(index);
+            index += 4;
+
+            // 3️⃣ Leer tipo de box (debe ser 'pssh' = 0x70737368)
+            let boxType = String.fromCharCode(
+                dataView.getUint8(index), dataView.getUint8(index + 1),
+                dataView.getUint8(index + 2), dataView.getUint8(index + 3)
+            );
+            index += 4;
+
+            if (boxType !== 'pssh') {
+                throw new Error('No es un PSSH válido');
+            }
+
+            // 4️⃣ Leer versión y flags (flags siempre 0)
+            let version = dataView.getUint8(index);
+            index += 4; // 1 byte de versión + 3 bytes de flags
+
+            // 5️⃣ Leer SystemID (UUID del DRM)
+            let systemID = [];
+            for (let i = 0; i < 16; i++) {
+                systemID.push(dataView.getUint8(index).toString(16).padStart(2, '0'));
+                if ([3, 5, 7, 9].includes(i)) systemID.push('-'); // Formato UUID
+                index++;
+            }
+            systemID = systemID.join('');
+
+            // 6️⃣ Leer cantidad de KIDs (si versión = 1)
+            let kids = [];
+            if (version === 1) {
+                let kidCount = dataView.getUint32(index);
+                index += 4;
+
+                for (let i = 0; i < kidCount; i++) {
+                    let kid = [];
+                    for (let j = 0; j < 16; j++) {
+                        kid.push(dataView.getUint8(index).toString(16).padStart(2, '0'));
+                        index++;
+                    }
+                    kids.push(kid.join(''));
+                }
+            }
+
+            // 7️⃣ Leer tamaño del payload
+            let dataSize = dataView.getUint32(index);
+            index += 4;
+
+            // 8️⃣ Leer payload binario
+            let payload = pssh.slice(index, index + dataSize);
+
+            // 9️⃣ Si el KID no se encuentra en versión 1, intentar extraerlo del payload (Widevine)
+            if (kids.length === 0 && systemID === "edef8ba9-79d6-4ace-a3c8-27dcd51d21ed") {
+                try {
+                    let payloadView = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+                    let kidIndex = payload.indexOf(18); // Buscar el prefijo que precede al KID
+                    if (kidIndex !== -1 && kidIndex + 16 <= payload.length) {
+                        let kid = [];
+                        for (let i = 0; i < 16; i++) {
+                            kid.push(payloadView.getUint8(kidIndex + 2 + i).toString(16).padStart(2, '0'));
+                        }
+                        kids.push(kid.join(''));
+                    }
+                } catch (e) {
+                    console.warn("No se pudo extraer el KID del payload");
+                }
+            }
+
+            return { systemID, version, kids, payload };
+        }
+        function decodeWidevinePSSHPayload(payload) {
+            const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+            let i = 0;
+            const result = { provider: null, contentId: null, cryptoPeriodIndex: null, protectionScheme: null };
+
+            function readVarint() {
+                let value = 0, shift = 0, byte;
+                do {
+                    byte = view.getUint8(i++);
+                    value |= (byte & 0x7F) << shift;
+                    shift += 7;
+                } while (byte & 0x80);
+                return value;
+            }
+
+            while (i < payload.byteLength) {
+                const tag = readVarint();
+                const fieldNumber = tag >> 3;
+                const wireType = tag & 0x07;
+
+                if (wireType === 2) { // length-delimited
+                    const len = readVarint();
+                    const bytes = payload.slice(i, i + len);
+                    if (fieldNumber === 3) result.provider = new TextDecoder().decode(bytes);
+                    if (fieldNumber === 4) result.contentId = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+                    i += len;
+                } else if (wireType === 0) { // varint
+                    const val = readVarint();
+                    if (fieldNumber === 7) result.cryptoPeriodIndex = val;
+                    if (fieldNumber === 9) result.protectionScheme = String.fromCharCode(...[(val >> 24) & 0xff, (val >> 16) & 0xff, (val >> 8) & 0xff, val & 0xff]);
+                } else if (wireType === 5) { // 32-bit
+                    const val = view.getUint32(i, true);
+                    if (fieldNumber === 9) result.protectionScheme = String.fromCharCode(...[(val >> 24) & 0xff, (val >> 16) & 0xff, (val >> 8) & 0xff, val & 0xff]);
+                    i += 4;
+                } else { i++; }
+            }
+            return result;
+        }
+        function uint8ToBase64(uint8) {
+            let binary = '';
+            for (let i = 0; i < uint8.length; i++) binary += String.fromCharCode(uint8[i]);
+            return btoa(binary);
+        }
+        async function initPlayer() {
+            //function initPlayer() {
+            // Create a Player instance.
+            var video = document.getElementById('video');
+            var videoContainer = document.getElementById('videoContainer');
+            var player = new shaka.Player(video);
+
+            // UI de Shaka en lugar de los controles nativos del navegador.
+            // Los nativos pintan la barra de 0 a mediaSource.duration (enorme en
+            // live) y no conocen la ventana DVR; la UI de Shaka usa
+            // player.seekRange(), por lo que permite ir hacia atrás en live.
+            var ui = new shaka.ui.Overlay(player, videoContainer, video);
+            ui.configure({
+                'seekBarColors': {
+                    base: 'rgba(255, 255, 255, 0.3)',
+                    buffered: 'rgba(255, 255, 255, 0.54)',
+                    played: 'rgb(255, 255, 255)',
+                },
+            });
+            window.ui = ui;
+
+            let rawManifestPeriods = [];
+
+            // Attach player to the window to make it easy to access in the JS console.
+            window.player = player;
+
+            var req = await fetch('https://wv-ottlic-f3.imagenio.telefonica.net/TFAESP/wvls/contentlicenseservice/v1/certificates');
+            const cert = new Uint8Array(await req.arrayBuffer());
+            //var cert = await req.arrayBuffer();
+
+            var drms = await probeSupport().then(function (drm) { return drm });
+            var isPlayready = drms["com.microsoft.playready"] !== null && drms["com.microsoft.playready"] !== undefined;
+            var isWidevine = drms["com.widevine.alpha"] !== null && drms["com.widevine.alpha"] !== undefined;
+
+            console.log("isPlayready: " + isPlayready);
+            console.log("isWidevine: " + isWidevine);
+
+            //var cert = "";
+            var config = {
+                "drm": {
+                    "singleLicenseRequest": true,
+                    "servers": {
+                        'com.widevine.alpha': 'https://wv-ottlic-f3.imagenio.telefonica.net/TFAESP/wvls/contentlicenseservice/v1/licenses',
+                    },
+                    "advanced": {
+                        'com.widevine.alpha': {
+                            //'sessionType':'persistent-session',
+                            'persistentStateRequired': true,
+                            'serverCertificate': cert,
+                        }
+                    }
+
+                },
+                "manifest": {
+                    "dash": {
+                        //defaultPresentationDelay: 20
+                        //ignoreMinBufferTime: false,
+                        //ignoreSuggestedPresentationDelay: false
+                    }
+                },
+                "streaming": {
+                    //lowLatencyMode: true
+                },
+                "abr": {
+                    "restrictions": {
+                        //"minBandwidth": 0, 
+                        //ABR soft restriction 
+                        // applyRestrictions utiliza config.restrictions, no config.abr.restrictions. 
+                        // Las variantes HD permanecen con allowedByApplication = true. 
+                        // Todas las variantes pasan a la inicialización del DRM → SÍ, 
+                        // Shaka solicita licencia para HD, aunque el ABR nunca la seleccione para reproducción.
+                        //"maxBandwidth": 2000000,
+                        //"maxHeight": 480, // Limitar a SD (480p)
+                    }
+                },
+                "restrictions": {
+                    //"minBandwidth": 0,
+                    //config.restrictions.maxBandwidth: 2000000 (restricción dura):
+                    //applyRestrictions establece allowedByApplication = false en las variantes HD. 
+                    // getPlayableVariants las excluye. 
+                    // El DRM se inicializa solo con variantes SD → solo el KID de SD obtiene una sesión
+                    // → NO hay solicitud de licencia para HD.
+                    //"maxBandwidth": 2000000,
+                    //"maxHeight": 480, // Limitar a SD (480p)
+                }
+            };
+
+            player.configure(config);
+
+            player.getNetworkingEngine().registerRequestFilter(function (type, request) {
+
+                switch (type) {
+                    case shaka.net.NetworkingEngine.RequestType.LICENSE:
+                        //para chrome
+                        //request.headers["nv-authorizations"] = "eyJraWQiOiI1MDA1MSIsImFsZyI6IkhTMjU2IiwidHlwIjoiSldUIn0.eyJ0eXAiOiJEZXZBdXRoTiIsInZlciI6IjEuMCIsImV4cCI6MTc5MjIxOTY0MiwiZml4ZWRfZXhwIjoxNzk0NzI1MjQyLCJ0ZW5hbnRJZCI6IlRGQUVTUCIsImFjY291bnRJZCI6IlRFOkRGMTc5MTk5MTE2OTgwIiwiZGV2aWNlSWQiOiIzM2I2ZWYzYTRjMmM0YmE1YWE2NjEzMjNmNDBjODJjNiIsImdlb0Jsb2NrRXhlbXB0IjpmYWxzZSwic2Vzc2lvbkNvbnRyb2wiOnsic2Vzc2lvbkNvbnRyb2xFbmFibGVkIjpmYWxzZSwibWF4U2Vzc2lvbnMiOjN9LCJhY2NvdW50UHJvZmlsZUlkIjoiREVGQVVMVCIsImJpbGxpbmdDb3VudHJ5Q29kZSI6IkVtcHR5Q291bnRyeSIsIm9uTmV0d29yayI6dHJ1ZSwiY2FjaGVLZXkiOiJUazlPUlEiLCJmaWx0ZXJpbmdJbmZvcm1hdGlvbiI6e30sImJsb2NraW5nSW5mb3JtYXRpb24iOnt9LCJ3YXRlcm1hcmtpbmciOnRydWV9.UgqMcyPF18k_DjiYeFt1llTwTxQhZ91HaXVtKCbniAA";
+                        //Para firefox claude limpio.
+                        request.headers["nv-authorizations"] = "eyJraWQiOiI1MDA1MSIsImFsZyI6IkhTMjU2IiwidHlwIjoiSldUIn0.eyJ0eXAiOiJEZXZBdXRoTiIsInZlciI6IjEuMCIsImV4cCI6MTc5MzI2NDE1MywiZml4ZWRfZXhwIjoxNzk1NzY5NzUzLCJ0ZW5hbnRJZCI6IlRGQUVTUCIsImFjY291bnRJZCI6IlRFOkRGMTc5MTk5MTE2OTgwIiwiZGV2aWNlSWQiOiJhZWVjNTM0NTA3N2Y0N2IyODkxYWMxYTNmNjhhZjY5YyIsImdlb0Jsb2NrRXhlbXB0IjpmYWxzZSwic2Vzc2lvbkNvbnRyb2wiOnsic2Vzc2lvbkNvbnRyb2xFbmFibGVkIjpmYWxzZSwibWF4U2Vzc2lvbnMiOjN9LCJhY2NvdW50UHJvZmlsZUlkIjoiREVGQVVMVCIsImJpbGxpbmdDb3VudHJ5Q29kZSI6IkVtcHR5Q291bnRyeSIsIm9uTmV0d29yayI6dHJ1ZSwiY2FjaGVLZXkiOiJUazlPUlEiLCJmaWx0ZXJpbmdJbmZvcm1hdGlvbiI6e30sImJsb2NraW5nSW5mb3JtYXRpb24iOnt9LCJ3YXRlcm1hcmtpbmciOnRydWV9.5VcGBzeyK14MwoCsrzhpAtxMD89ga9bRS2g36cpbsN8";
+
+                        break;
+                    case shaka.net.NetworkingEngine.RequestType.MANIFEST:
+                    case shaka.net.NetworkingEngine.RequestType.SEGMENT:
+                        request.headers["X-TCDN-token"] = "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImI1OGNhNGM0NGFiOTQ0Y2FiY2U4N2FjNGJmZmI4MDNkIn0.eyJpYXQiOjE3OTMxNzc2NzAsInN1YiI6IkdKRzMrY2FZOGNQNUo5QW1jT2FDaXc9PSIsImlkcCI6Im1vdmlzdGFyKyIsImF1dGhfdGltZSI6MTc5MzE3NzY3MCwibmJmIjoxNzkzMTc3NjcwLCJleHAiOjE3OTMyMjA4NzAsImlzcyI6Imh0dHBzOi8vc290ZXItcGYuc3ZlLnZpZGVvLnRlbGVmb25pY2FzZXJ2aWNlcy5jb20vc2VydmljZS90Y2RuaWRzZXJ2ZXIiLCJzY29wZSI6ImNkbiIsImF1ZCI6InRjZG4iLCJjbGllbnRfaWQiOiJtb3Zpc3RhcnBsdXMiLCJqdGkiOiIyRTI1MUFCQjEyOTc1RTM0NzhFQkE0MTlBRTc4Qzg5RSIsInVpZCI6Imo2c2dkdmpISHJRUDluOFJCTG55dEhGa29KaXVIemhKOEZlQWVyT201enM9IiwiYWNjIjoiTUFmcmxiSDlGYXlGbCtXbUdpSEhZN214UzRVaElpa0E4N0xDMDAvNXlwZz0iLCJzIjoiMTM5IiwiY2hwIjp0cnVlfQ.Q4FXtAdwP9qKjR0qDqDWRDv6iNBAB1wgZe1gTJV1ZxWh_RH14SAnFCvcah5pvjmX-7zDKDQCzn8biD3NZH57sA";
+                        break;
+                }
+            });
+
+            player.getNetworkingEngine().registerResponseFilter(function (type, response) {
+                if (type != shaka.net.NetworkingEngine.RequestType.LICENSE || player.drmInfo().keySystem != 'com.apple.fps.1_0') {
+                    return;
+                }
+
+                let responseText = shaka.util.StringUtils.fromUTF8(response.data);
+                // Trim whitespace.
+                responseText = responseText.trim();
+
+                // Look for <ckc> wrapper and remove it.
+                if (responseText.substr(0, 5) === '<ckc>' &&
+                    responseText.substr(-6) === '</ckc>') {
+                    responseText = responseText.slice(5, -6);
+                }
+
+                var jsonkey = JSON.parse(responseText);
+                var raw = window.atob(jsonkey.CkcMessage);
+                var rawLength = raw.length;
+                var array = new Uint8Array(new ArrayBuffer(rawLength));
+
+                for (var i = 0; i < rawLength; i++)
+                    array[i] = raw.charCodeAt(i);
+
+                response.data = array;
+            });
+
+            // Listen for error events.
+            player.addEventListener('error', onErrorEvent);
+            player.addEventListener('emsg', onEmsgEvent);
+            player.addEventListener('loaded', onLoadedEvent);
+            player.addEventListener('loading', onLoadingEvent);
+            player.addEventListener('manifestparsed', onManifestParsedEvent);
+            player.addEventListener('onstatechange', onStateChangeEvent);
+            player.addEventListener('largegap', onLargeGapEvent);
+            player.addEventListener('onstateidle', onStateIdleEvent);
+            player.addEventListener('streaming', onStreamingEvent);
+            player.addEventListener('trackschanged', onTracksChangedEvent);
+            player.addEventListener('drmsessionupdate', (event) => {
+                // Fired when the CDM accepts a license.  event.keyIds lists
+                // the KIDs that license covers (CDM key statuses plus, for
+                // Widevine, the keys found in the license itself).
+                const kids = (event.keyIds || []).map((k) =>
+                    k.replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, '$1-$2-$3-$4-$5'));
+                console.log('drmsessionupdate: licencia aceptada, sesión ' + event.sessionId +
+                    ', cubre ' + kids.length + ' KID(s): ' + (kids.join(', ') || '(ninguno)'));
+            });
+            // keystatuschanged fires from onKeyStatus_(), which is called
+            // directly by processKeyStatusChanges_() once the debounce timer
+            // expires and ALL sessions are loaded.  At this point
+            // getKeyStatuses() is guaranteed to return the full, current map.
+            player.addEventListener('keystatuschanged', () => {
+                const keyStatuses = player.getKeyStatuses();
+                const keys = Object.keys(keyStatuses);
+                console.log(`keystatuschanged: ${keys.length} clave(s) en CDM`, keyStatuses);
+            });
+
+            // Try to load a manifest.
+            // This is an asynchronous process.
+            // Try to load a manifest.
+            var requestedLicence = false;
+            const callback = function name(params) {
+                // The first time the callback is called it will allow a licence request.
+                // On subsequent calls it will force no licence requests
+                //if (requestedLicence) {
+                    // console.log("EUGENIOOOOOOOOOOOO duplicado");
+                //    return [true, false];
+                //}
+                console.log("EUGENIOOOOOOOOOOOO callback");
+                //requestedLicence = true;
+                return [false, false];
+            }
+
+            player.setLicenceRequiredCallback(callback);
+
+            // Trazas del elemento <video> para ver dónde se queda parado.
+            ['play', 'playing', 'pause', 'waiting', 'stalled', 'canplay', 'error'].forEach(function (ev) {
+                video.addEventListener(ev, function () {
+                    console.log('[video] ' + ev + ' readyState=' + video.readyState +
+                        ' paused=' + video.paused + ' currentTime=' + video.currentTime,
+                        ev == 'error' ? video.error : '');
+                });
+            });
+
+            player.load(manifestUri).then(function () {
+                // This runs if the asynchronous load is successful.
+                console.log('********************The video has now been loaded!****************');
+
+                // Ni Shaka ni la UI arrancan la reproducción solos: sin autoplay
+                // el vídeo se queda en pausa mostrando el poster.
+                // Chrome bloquea autoplay con sonido sin gesto del usuario, así
+                // que si falla se reintenta en mute.
+                video.play().catch(function (e) {
+                    console.warn('play() rechazado (' + e.name + '), reintentando en mute');
+                    video.muted = true;
+                    return video.play();
+                }).catch(function (e) {
+                    console.error('play() falló también en mute', e);
+                });
+
+            }).catch(onError);  // onError is executed if the asynchronous load fails.
+
+        }
+
+        function onEmsgEvent(event) {
+            console.log('onEmsgEvent: ', event);
+        }
+        function onTracksChangedEvent(event) {
+            console.log('onTracksChangedEvent: ', event);
+        }
+        function onStreamingEvent(event) {
+            console.log('onStreamingEvent: ', event);
+
+        }
+        function onStateIdleEvent(event) {
+            console.log('onStateIdleEvent: ', event);
+            if (event.state == 'load') {
+                //player.getMediaElement().currentTime=2;
+                //player.getMediaElement().play();
+            }
+        }
+        function onLargeGapEvent(event) {
+            console.log('onLargeGapEvent: ');
+            console.log(event);
+
+        }
+        function onManifestParsedEvent(event) {
+            console.log('onManifestParsedEvent: ', event);
+        }
+        function onStateChangeEvent(event) {
+            console.log('onStateChangeEvent: ', event);
+            console.log('onStateChangeEvent code: ', event.state);
+            if (event.state == 'load') {
+                //player.getMediaElement().currentTime=2;
+                //player.getMediaElement().play();
+            }
+
+        }
+        function onLoadedEvent(event) {
+            console.log('onLoadedEvent: ', event);
+
+        }
+        function onLoadingEvent(event) {
+            console.log('onLoadingEvent: ', event);
+        }
+
+        function onErrorEvent(event) {
+            // Extract the shaka.util.Error object from the event.
+            onError(event.detail);
+        }
+
+        function onError(error) {
+            // Log the error.
+            console.error('Error code', error.code, 'object', error);
+        }
+
+        //document.addEventListener('DOMContentLoaded', initApp);
+        window.onload = function () {
+            // Todo tu código aquí
+            initApp();
+            console.log("initApp called");
+            document.addEventListener("keydown", function (e) {
+                console.log("Key: " + e.keyCode);
+            });
+        };
+    </script>
+</head>
+
+<body style="margin:0;background:#000;display:flex;flex-direction:column;align-items:center;">
+    <div id="videoContainer" style="width:640px;height:480px;">
+        <video id="video" style="width:100%;height:100%;"
+            poster="https://ver.movistarplus.es/img/modulos_dispositivos.png"></video>
+    </div>
+    <button id="btnPlayPause" onclick="var v=document.getElementById('video');v.paused?v.play():v.pause();" tabindex="0"
+        style="margin-top:20px;padding:20px 60px;font-size:32px;background:#e00;color:#fff;border:none;border-radius:12px;cursor:pointer;outline:3px solid transparent;"
+        onfocus="this.style.outline='3px solid #fff';" onblur="this.style.outline='3px solid transparent';">
+        ▶ Play
+    </button>
+</body>
+
+</html>

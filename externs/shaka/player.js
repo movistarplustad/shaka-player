@@ -775,7 +775,9 @@ shaka.extern.PersistentSessionMetadata;
  *   keySystemsMapping: !Object.<string, string>,
  *   parseInbandPsshEnabled: boolean,
  *   minHdcpVersion: string,
- *   ignoreDuplicateInitData: boolean
+ *   ignoreDuplicateInitData: boolean,
+ *   singleLicenseRequest: boolean,
+ *   singleLicenseRequestBlindMode: boolean
  * }}
  *
  * @property {shaka.extern.RetryParameters} retryParameters
@@ -837,6 +839,35 @@ shaka.extern.PersistentSessionMetadata;
  *   Note: Tizen 2015 and 2016 models will send multiple webkitneedkey events
  *   with the same init data. If the duplicates are supressed, playback
  *   will stall without errors.
+ * @property {boolean} singleLicenseRequest
+ *   <i>Defaults to false.</i><br>
+ *   Keys on demand, for live channels with key-per-track and/or key rotation
+ *   where the manifest signals the key ID of each track and Period
+ *   (<code>cenc:default_KID</code>).  When true, the init data found in the
+ *   manifest is only registered by key ID; the license for a key is requested
+ *   when the player is about to append an init segment whose media needs it
+ *   (at startup, on each Period change, after a seek out of the buffer).
+ *   Only one license request is in flight at a time; keys that arrive in the
+ *   meantime (for example because the server bundles the keys of every
+ *   authorized track) are not requested again.  A stream whose key has no
+ *   status yet is not restricted; it is restricted when one of its keys is
+ *   reported as restricted, or when it has no usable key and one of its keys
+ *   was requested and the server refused it (HTTP 4xx) or did not include it
+ *   in the license.  Such a key is not requested again during this playback.
+ *   Init data without a key ID (<code>encrypted</code> events, in-band PSSH,
+ *   HLS) is handled as usual, and init segments without a key ID request every
+ *   registered key that is still missing, one at a time.
+ * @property {boolean} singleLicenseRequestBlindMode
+ *   <i>Defaults to false.</i><br>
+ *   Only has an effect together with <code>singleLicenseRequest</code>.
+ *   Extends the single license request mode to platforms whose EME does not
+ *   report per-key statuses (polyfilled EME, e.g. LG webOS 3.x or legacy
+ *   Safari).  On those platforms the player cannot ask the CDM which keys it
+ *   has, so for Widevine it reads the delivered key IDs from the license
+ *   itself and reports them as usable in <code>getKeyStatuses()</code> next
+ *   to the synthetic global status; with other key systems every key gets its
+ *   own (serialized) request.  When false, those platforms behave as if
+ *   <code>singleLicenseRequest</code> were disabled.
  * @exportDoc
  */
 shaka.extern.DrmConfiguration;

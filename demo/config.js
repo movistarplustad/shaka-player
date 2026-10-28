@@ -131,7 +131,11 @@ shakaDemo.Config = class {
             'drm.parseInbandPsshEnabled')
         .addTextInput_('Min HDCP version', 'drm.minHdcpVersion')
         .addBoolInput_('Ignore duplicate init data',
-            'drm.ignoreDuplicateInitData');
+            'drm.ignoreDuplicateInitData')
+        .addBoolInput_('Single license request',
+            'drm.singleLicenseRequest')
+        .addBoolInput_('Single license request: blind mode (polyfilled EME)',
+            'drm.singleLicenseRequestBlindMode');
     const advanced = shakaDemoMain.getConfiguration().drm.advanced || {};
     const addDRMAdvancedField = (name, valueName, suggestions) => {
       // All advanced fields of a given type are set at once.

@@ -59,5 +59,31 @@ describe('InitSegmentReference', () => {
     expect(reference.getStartByte()).toBe(4);
     expect(reference.getEndByte()).toBe(5);
     expect(reference.getMediaQuality()).toBe(mediaQuality);
+    expect(reference.keyIds).toEqual([]);
+  });
+
+  it('compares key IDs in equal()', () => {
+    const InitSegmentReference = shaka.media.InitSegmentReference;
+    /**
+     * @param {!Array.<string>} keyIds
+     * @return {!shaka.media.InitSegmentReference}
+     */
+    const makeReference = (keyIds) => {
+      const reference = new InitSegmentReference(
+          /* getUris= */ () => ['x'], /* startByte= */ 0, /* endByte= */ null);
+      reference.keyIds = keyIds;
+      return reference;
+    };
+
+    expect(InitSegmentReference.equal(makeReference([]), makeReference([])))
+        .toBe(true);
+    expect(InitSegmentReference.equal(
+        makeReference(['a']), makeReference(['a']))).toBe(true);
+    expect(InitSegmentReference.equal(
+        makeReference(['a', 'b']), makeReference(['b', 'a']))).toBe(true);
+    expect(InitSegmentReference.equal(
+        makeReference(['a']), makeReference(['b']))).toBe(false);
+    expect(InitSegmentReference.equal(
+        makeReference(['a']), makeReference([]))).toBe(false);
   });
 });

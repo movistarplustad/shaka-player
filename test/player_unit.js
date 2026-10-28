@@ -2985,6 +2985,265 @@ describe('Player', () => {
   });
 
   describe('restrictions', () => {
+    describe('singleLicenseRequest', () => {
+      /** @type {!Uint8Array} */
+      const sdInitData = new Uint8Array([1]);
+      /** @type {!Uint8Array} */
+      const hdInitData = new Uint8Array([2]);
+
+      beforeEach(() => {
+        manifest = shaka.test.ManifestGenerator.generate((manifest) => {
+          manifest.addVariant(0, (variant) => {
+            variant.bandwidth = 100;
+            variant.addVideo(1, (stream) => {
+              stream.encrypted = true;
+              stream.keyIds = new Set(['sd']);
+              stream.addDrmInfo('com.example.fake', (drmInfo) => {
+                drmInfo.addInitData('cenc', sdInitData);
+                drmInfo.initData[0].keyId = 'sd';
+              });
+              stream.size(10, 10);
+            });
+          });
+          manifest.addVariant(1, (variant) => {
+            variant.bandwidth = 500;
+            variant.addVideo(2, (stream) => {
+              stream.encrypted = true;
+              stream.keyIds = new Set(['hd']);
+              stream.addDrmInfo('com.example.fake', (drmInfo) => {
+                drmInfo.addInitData('cenc', hdInitData);
+                drmInfo.initData[0].keyId = 'hd';
+              });
+              stream.size(20, 20);
+            });
+          });
+        });
+
+        drmEngine.setDrmInfo({
+          keySystem: 'com.example.fake',
+          licenseServerUri: 'http://example.com/license',
+          distinctiveIdentifierRequired: false,
+          persistentStateRequired: false,
+          audioRobustness: '',
+          videoRobustness: '',
+          serverCertificate: null,
+          serverCertificateUri: '',
+          sessionType: '',
+          initData: [],
+          keyIds: new Set(),
+        });
+        drmEngine.getMediaKeys.and.returnValue({});
+      });
+
+      it('registers the init data of every variant, restricted or not',
+          async () => {
+            player.configure({
+              drm: {singleLicenseRequest: true},
+              restrictions: {maxBandwidth: 200},
+            });
+
+            await player.load(fakeManifestUri, 0, fakeMimeType);
+
+            expect(drmEngine.newInitData)
+                .toHaveBeenCalledWith('cenc', sdInitData, 'sd');
+            expect(drmEngine.newInitData)
+                .toHaveBeenCalledWith('cenc', hdInitData, 'hd');
+          });
+
+      it('asks for the keys of an init segment about to be appended',
+          async () => {
+            await player.load(fakeManifestUri, 0, fakeMimeType);
+            const stream = manifest.variants[0].video;
+
+            const initSegment = new shaka.media.InitSegmentReference(
+                () => ['init.mp4'], 0, null);
+            initSegment.keyIds = ['sd'];
+
+            // Not in legacy mode.
+            onInitSegmentAppended(0, initSegment, stream);
+            expect(drmEngine.ensureKeysAvailable).not.toHaveBeenCalled();
+
+            drmEngine.isOnDemandKeyMode.and.returnValue(true);
+            onInitSegmentAppended(0, initSegment, stream);
+            expect(drmEngine.ensureKeysAvailable).toHaveBeenCalledWith(['sd']);
+            drmEngine.ensureKeysAvailable.calls.reset();
+
+            // Without a key ID, every missing key is requested, but only for
+            // encrypted streams.
+            initSegment.keyIds = [];
+            onInitSegmentAppended(0, initSegment, stream);
+            expect(drmEngine.ensureKeysAvailable).toHaveBeenCalledWith([]);
+            drmEngine.ensureKeysAvailable.calls.reset();
+
+            const clearStream = shaka.test.ManifestGenerator.generate(
+                (manifest) => {
+                  manifest.addVariant(9, (variant) => {
+                    variant.addVideo(9, (stream) => {
+                      stream.encrypted = false;
+                    });
+                  });
+                }).variants[0].video;
+            onInitSegmentAppended(0, initSegment, clearStream);
+            expect(drmEngine.ensureKeysAvailable).not.toHaveBeenCalled();
+          });
+
+      it('re-applies known key statuses when variants are refiltered',
+          async () => {
+            player.configure({drm: {singleLicenseRequest: true}});
+            await player.load(fakeManifestUri, 0, fakeMimeType);
+
+            // The first license only brought the SD key.
+            drmEngine.getKeyStatuses.and.returnValue({'sd': 'usable'});
+            onKeyStatus({'sd': 'usable'});
+            expect(manifest.variants[0].allowedByKeySystem).toBe(true);
+            expect(manifest.variants[1].allowedByKeySystem).toBe(false);
+
+            // The manifest parser rebuilds the variants (e.g. a new Period)
+            // with the key system restriction reset, and the manifest gets
+            // filtered again without any new key status event.
+            manifest.variants[1].allowedByKeySystem = true;
+            player.configure({restrictions: {maxBandwidth: 1000}});
+
+            expect(manifest.variants[0].allowedByKeySystem).toBe(true);
+            expect(manifest.variants[1].allowedByKeySystem).toBe(false);
+
+            // But not while a license for a new key is still in flight: the
+            // statuses are about to change.
+            drmEngine.hasPendingLicenseRequests.and.returnValue(true);
+            manifest.variants[1].allowedByKeySystem = true;
+            player.configure({restrictions: {maxBandwidth: 2000}});
+
+            expect(manifest.variants[1].allowedByKeySystem).toBe(true);
+          });
+
+      describe('on-demand key rule', () => {
+        beforeEach(() => {
+          drmEngine.isOnDemandKeyMode.and.returnValue(true);
+          player.configure({drm: {singleLicenseRequest: true}});
+        });
+
+        /**
+         * @param {!Array.<string>} unavailableKeyIds
+         */
+        function setUnavailableKeys(unavailableKeyIds) {
+          drmEngine.isKeyUnavailable.and.callFake(
+              (keyId) => unavailableKeyIds.includes(keyId));
+          drmEngine.hasUnavailableKeys.and.returnValue(
+              unavailableKeyIds.length > 0);
+        }
+
+        it('does not restrict streams whose keys have no status',
+            async () => {
+              await player.load(fakeManifestUri, 0, fakeMimeType);
+
+              onKeyStatus({'sd': 'usable'});
+              expect(manifest.variants[0].allowedByKeySystem).toBe(true);
+              expect(manifest.variants[1].allowedByKeySystem).toBe(true);
+            });
+
+        it('restricts streams with a restricted key', async () => {
+          await player.load(fakeManifestUri, 0, fakeMimeType);
+
+          onKeyStatus({'sd': 'usable', 'hd': 'output-restricted'});
+          expect(manifest.variants[0].allowedByKeySystem).toBe(true);
+          expect(manifest.variants[1].allowedByKeySystem).toBe(false);
+        });
+
+        it('restricts streams with an unavailable key and no usable one',
+            async () => {
+              await player.load(fakeManifestUri, 0, fakeMimeType);
+
+              setUnavailableKeys(['hd']);
+              onKeyStatus({'sd': 'usable'});
+              expect(manifest.variants[0].allowedByKeySystem).toBe(true);
+              expect(manifest.variants[1].allowedByKeySystem).toBe(false);
+            });
+
+        it('switches away from the active stream whose key is unavailable',
+            async () => {
+              // Start on the HD variant.
+              abrManager.chooseIndex = 1;
+              await player.load(fakeManifestUri, 0, fakeMimeType);
+              expect(getActiveVariantTrack().id).toBe(1);
+
+              abrManager.chooseIndex = 0;
+              abrManager.chooseVariant.calls.reset();
+              streamingEngine.switchVariant.calls.reset();
+
+              // The HD key was asked for and did not come; no key status was
+              // reported at all.
+              setUnavailableKeys(['hd']);
+              onKeyStatus({});
+
+              expect(manifest.variants[1].allowedByKeySystem).toBe(false);
+              expect(manifest.variants[0].allowedByKeySystem).toBe(true);
+              expect(abrManager.chooseVariant).toHaveBeenCalled();
+              // The buffer is cleared: it may hold segments without a key.
+              expect(streamingEngine.switchVariant).toHaveBeenCalledWith(
+                  manifest.variants[0], /* clearBuffer= */ true, 0, false,
+                  true);
+              expect(getActiveVariantTrack().id).toBe(0);
+            });
+
+        it('does not restrict a stream with an old unavailable key and a ' +
+           'usable one', async () => {
+          await player.load(fakeManifestUri, 0, fakeMimeType);
+
+          // Key rotation: the SD stream spans two Periods.
+          manifest.variants[0].video.keyIds = new Set(['sd-old', 'sd']);
+          setUnavailableKeys(['sd-old']);
+          onKeyStatus({'sd': 'usable'});
+
+          expect(manifest.variants[0].allowedByKeySystem).toBe(true);
+          expect(manifest.variants[1].allowedByKeySystem).toBe(true);
+        });
+
+        it('fails only when every variant is rejected', async () => {
+          await player.load(fakeManifestUri, 0, fakeMimeType);
+
+          onError.and.callFake((e) => {
+            shaka.test.Util.expectToEqualError(
+                e.detail,
+                new shaka.util.Error(
+                    shaka.util.Error.Severity.CRITICAL,
+                    shaka.util.Error.Category.MANIFEST,
+                    shaka.util.Error.Code.RESTRICTIONS_CANNOT_BE_MET, {
+                      hasAppRestrictions: false,
+                      missingKeys: ['sd', 'hd'],
+                      restrictedKeyStatuses: [],
+                    }));
+          });
+
+          setUnavailableKeys(['sd']);
+          onKeyStatus({});
+          expect(onError).not.toHaveBeenCalled();
+          expect(manifest.variants[0].allowedByKeySystem).toBe(false);
+          expect(manifest.variants[1].allowedByKeySystem).toBe(true);
+
+          setUnavailableKeys(['sd', 'hd']);
+          onKeyStatus({});
+          expect(onError).toHaveBeenCalledTimes(1);
+          expect(manifest.variants[0].allowedByKeySystem).toBe(false);
+          expect(manifest.variants[1].allowedByKeySystem).toBe(false);
+        });
+
+        it('re-applies unavailable keys when variants are refiltered',
+            async () => {
+              await player.load(fakeManifestUri, 0, fakeMimeType);
+
+              setUnavailableKeys(['hd']);
+              onKeyStatus({});
+              expect(manifest.variants[1].allowedByKeySystem).toBe(false);
+
+              // Variants rebuilt by the parser, no key status at all.
+              manifest.variants[1].allowedByKeySystem = true;
+              player.configure({restrictions: {maxBandwidth: 1000}});
+              expect(manifest.variants[0].allowedByKeySystem).toBe(true);
+              expect(manifest.variants[1].allowedByKeySystem).toBe(false);
+            });
+      });  // describe('on-demand key rule')
+    });  // describe('singleLicenseRequest')
+
     it('switches if active is restricted by application', async () => {
       manifest = shaka.test.ManifestGenerator.generate((manifest) => {
         manifest.addVariant(0, (variant) => {
@@ -4521,6 +4780,17 @@ describe('Player', () => {
    */
   function onKeyStatus(keyStatusMap) {
     player.onKeyStatus_(keyStatusMap);
+  }
+
+  /**
+   * @param {number} position
+   * @param {!shaka.media.InitSegmentReference} initSegment
+   * @param {?shaka.extern.Stream} stream
+   * @suppress {accessControls}
+   */
+  function onInitSegmentAppended(position, initSegment, stream) {
+    goog.asserts.assert(stream, 'stream should be non-null here.');
+    player.onInitSegmentAppended_(position, initSegment, stream);
   }
 
   /**

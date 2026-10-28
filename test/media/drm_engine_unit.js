@@ -1356,6 +1356,20 @@ describe('DrmEngine', () => {
             .toHaveBeenCalledWith('webm', initData1);
       });
 
+      it('creates sessions for duplicate initDatas when configured to',
+          async () => {
+            config.ignoreDuplicateInitData = false;
+            drmEngine.configure(config);
+            await initAndAttach();
+
+            const initData1 = new Uint8Array(1);
+
+            await sendEncryptedEvent('webm', initData1);
+            await sendEncryptedEvent('cenc'); // identical to webm initData
+
+            expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(2);
+          });
+
       it('set media keys when not already done at startup', async () => {
         await initAndAttach();
         await sendEncryptedEvent();
@@ -1530,6 +1544,31 @@ describe('DrmEngine', () => {
         session1.on['keystatuseschange']({target: session1});
         await Util.shortDelay();
         expect(onKeyStatusSpy).toHaveBeenCalled();
+      });
+
+      it('ignores key statuses from a session that was removed', async () => {
+        await initAndAttach();
+        await sendEncryptedEvent('cenc', new Uint8Array(1));
+        await sendEncryptedEvent('cenc', new Uint8Array(2));
+
+        // With two sessions active, a failed license request silently drops
+        // the session.
+        const netError = new shaka.util.Error(
+            shaka.util.Error.Severity.CRITICAL,
+            shaka.util.Error.Category.NETWORK,
+            shaka.util.Error.Code.BAD_HTTP_STATUS,
+            'http://abc.drm/license', 403);
+        fakeNetEngine.request.and.returnValue(
+            shaka.util.AbortableOperation.failed(netError));
+        session2.on['message']({target: session2, message: new Uint8Array(0)});
+        await Util.shortDelay();
+
+        session2.keyStatuses.forEach.and.callFake((callback) => {
+          callback(makeKeyId(2), 'expired');
+        });
+        expect(() => {
+          session2.on['keystatuseschange']({target: session2});
+        }).not.toThrow();
       });
 
       // See https://github.com/shaka-project/shaka-player/issues/1541
@@ -2217,6 +2256,845 @@ describe('DrmEngine', () => {
       await drmEngine.destroy();
     });
   });  // describe('destroy')
+
+  describe('singleLicenseRequest', () => {
+    const DUMMY_KEY_ID = shaka.media.DrmEngine.DUMMY_KEY_ID;
+    const originalPolyfillFlag = window.shakaMediaKeysPolyfill;
+
+    /** @type {!Uint8Array} */
+    const initData1 = new Uint8Array([1]);
+    /** @type {!Uint8Array} */
+    const initData2 = new Uint8Array([2]);
+    /** @type {!Uint8Array} */
+    const initData3 = new Uint8Array([3]);
+    /** @type {!Uint8Array} */
+    const initData4 = new Uint8Array([4]);
+
+    let session4;
+
+    beforeEach(() => {
+      config.singleLicenseRequest = true;
+      drmEngine.configure(config);
+
+      session4 = createMockSession();
+      mockMediaKeys.createSession.and.callFake(() => {
+        const index = mockMediaKeys.createSession.calls.count() - 1;
+        return [session1, session2, session3, session4][index];
+      });
+    });
+
+    afterEach(() => {
+      window.shakaMediaKeysPolyfill = originalPolyfillFlag;
+    });
+
+    /**
+     * A 16-byte key ID, as hex, for a small number.
+     * @param {number} id
+     * @return {string}
+     */
+    function kid(id) {
+      return id.toString(16).padStart(32, '0');
+    }
+
+    /**
+     * @param {number} id
+     * @return {!ArrayBuffer}
+     */
+    function kidBuffer(id) {
+      return shaka.util.BufferUtils.toArrayBuffer(
+          shaka.util.Uint8ArrayUtils.fromHex(kid(id)));
+    }
+
+    /** Puts three init datas with key IDs 1, 2 and 3 in the manifest. */
+    function setupThreeKeys() {
+      tweakDrmInfos((drmInfos) => {
+        drmInfos[0].initData = [
+          {initData: initData1, initDataType: 'cenc', keyId: kid(1)},
+          {initData: initData2, initDataType: 'cenc', keyId: kid(2)},
+          {initData: initData3, initDataType: 'cenc', keyId: kid(3)},
+        ];
+      });
+    }
+
+    /**
+     * @param {?} session A mock session.
+     * @param {!Object.<string, string>} statuses key number -> status
+     */
+    function setStatuses(session, statuses) {
+      session.keyStatuses.forEach.and.callFake((callback) => {
+        for (const id of Object.keys(statuses)) {
+          callback(kidBuffer(Number(id)), statuses[id]);
+        }
+      });
+    }
+
+    /**
+     * @param {?} session A mock session.
+     */
+    function setSyntheticStatus(session) {
+      session.keyStatuses.forEach.and.callFake((callback) => {
+        callback(DUMMY_KEY_ID.value(), 'usable');
+      });
+    }
+
+    /**
+     * @param {?} session A mock session.
+     * @param {string=} messageType
+     */
+    function sendMessage(session, messageType = 'license-request') {
+      session.on['message']({
+        target: session,
+        message: new Uint8Array(0),
+        messageType: messageType,
+      });
+    }
+
+    /**
+     * @param {number} value
+     * @return {!Array.<number>}
+     */
+    function base128(value) {
+      const bytes = [];
+      do {
+        let byte = value % 128;
+        value = Math.floor(value / 128);
+        if (value > 0) {
+          byte |= 0x80;
+        }
+        bytes.push(byte);
+      } while (value > 0);
+      return bytes;
+    }
+
+    /**
+     * @param {number} fieldNumber
+     * @param {!Array.<number>} bytes
+     * @return {!Array.<number>}
+     */
+    function bytesField(fieldNumber, bytes) {
+      return base128(fieldNumber * 8 + 2).concat(base128(bytes.length), bytes);
+    }
+
+    /**
+     * Builds a Widevine SignedMessage(LICENSE) carrying the given content
+     * keys.
+     * @param {!Array.<number>} ids
+     * @return {!Uint8Array}
+     */
+    function widevineLicense(ids) {
+      let license = [];
+      for (const id of ids) {
+        const keyIdBytes =
+            Array.from(shaka.util.Uint8ArrayUtils.fromHex(kid(id)));
+        const container = bytesField(1, keyIdBytes).concat(
+            base128(4 * 8).concat(base128(2)));  // type = CONTENT
+        license = license.concat(bytesField(3, container));
+      }
+      const signed = base128(1 * 8).concat(base128(2))  // type = LICENSE
+          .concat(bytesField(2, license));
+      return new Uint8Array(signed);
+    }
+
+    it('registers manifest init data without creating sessions',
+        async () => {
+          setupThreeKeys();
+          await initAndAttach();
+
+          expect(drmEngine.isOnDemandKeyMode()).toBe(true);
+          expect(mockMediaKeys.createSession).not.toHaveBeenCalled();
+          expect(drmEngine.hasPendingLicenseRequests()).toBe(false);
+          expect(drmEngine.hasUnavailableKeys()).toBe(false);
+          // Nothing to wait for.
+          await drmEngine.createOrLoad();
+          expect(mockMediaKeys.createSession).not.toHaveBeenCalled();
+        });
+
+    it('reports pending license requests', async () => {
+      setupThreeKeys();
+      await initAndAttach();
+      expect(drmEngine.hasPendingLicenseRequests()).toBe(false);
+
+      drmEngine.ensureKeysAvailable([kid(1)]);
+      expect(drmEngine.hasPendingLicenseRequests()).toBe(true);
+
+      setStatuses(session1, {1: 'usable'});
+      sendMessage(session1);
+      session1.on['keystatuseschange']({target: session1});
+      await Util.shortDelay();
+
+      expect(drmEngine.hasPendingLicenseRequests()).toBe(false);
+    });
+
+    it('reports the key IDs a license covers', async () => {
+      // Independent of the single license request mode.
+      config.singleLicenseRequest = false;
+      drmEngine.configure(config);
+      fakeNetEngine.setResponseValue(
+          'http://abc.drm/license', widevineLicense([1, 2]));
+
+      setupThreeKeys();
+      await initAndAttach();
+
+      setStatuses(session1, {3: 'usable'});
+      sendMessage(session1);
+      await Util.shortDelay();
+
+      expect(onEventSpy).toHaveBeenCalledWith(jasmine.objectContaining({
+        type: 'drmsessionupdate',
+        keyIds: jasmine.arrayWithExactContents([kid(3), kid(1), kid(2)]),
+      }));
+    });
+
+    it('requests a registered key on demand, one request at a time',
+        async () => {
+          setupThreeKeys();
+          await initAndAttach();
+
+          drmEngine.ensureKeysAvailable([kid(3)]);
+          expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(1);
+          expect(session1.generateRequest)
+              .toHaveBeenCalledWith('cenc', initData3);
+
+          // Asking again for a key in flight does nothing; another key has
+          // to wait for its turn.
+          drmEngine.ensureKeysAvailable([kid(3)]);
+          drmEngine.ensureKeysAvailable([kid(2)]);
+          drmEngine.ensureKeysAvailable([kid(2)]);
+          expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(1);
+
+          setStatuses(session1, {3: 'usable'});
+          sendMessage(session1);
+          session1.on['keystatuseschange']({target: session1});
+          await Util.shortDelay();
+
+          // Nothing is announced while a key is still being requested.
+          expect(onKeyStatusSpy).not.toHaveBeenCalled();
+          expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(2);
+          expect(session2.generateRequest)
+              .toHaveBeenCalledWith('cenc', initData2);
+
+          setStatuses(session2, {2: 'usable'});
+          sendMessage(session2);
+          session2.on['keystatuseschange']({target: session2});
+          await Util.shortDelay();
+
+          expect(fakeNetEngine.request).toHaveBeenCalledTimes(2);
+          expect(onKeyStatusSpy).toHaveBeenCalledTimes(1);
+          expect(onKeyStatusSpy).toHaveBeenCalledWith({
+            [kid(3)]: 'usable',
+            [kid(2)]: 'usable',
+          });
+
+          // Keys we already have are not requested again.
+          drmEngine.ensureKeysAvailable([kid(2), kid(3)]);
+          expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(2);
+        });
+
+    it('does not request keys that came with another license', async () => {
+      setupThreeKeys();
+      await initAndAttach();
+
+      drmEngine.ensureKeysAvailable([kid(1), kid(2)]);
+      expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(1);
+
+      // The server bundles the keys of every authorized track.
+      setStatuses(session1, {1: 'usable', 2: 'usable'});
+      sendMessage(session1);
+      session1.on['keystatuseschange']({target: session1});
+      await Util.shortDelay();
+
+      expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(1);
+      expect(fakeNetEngine.request).toHaveBeenCalledTimes(1);
+      expect(onKeyStatusSpy).toHaveBeenCalledTimes(1);
+      expect(onKeyStatusSpy).toHaveBeenCalledWith({
+        [kid(1)]: 'usable',
+        [kid(2)]: 'usable',
+      });
+    });
+
+    it('requests a wanted key as soon as its init data is registered',
+        async () => {
+          await initAndAttach();
+
+          drmEngine.ensureKeysAvailable([kid(4)]);
+          expect(mockMediaKeys.createSession).not.toHaveBeenCalled();
+
+          // As a manifest update would do.
+          drmEngine.newInitData('cenc', initData4, kid(4));
+          expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(1);
+          expect(session1.generateRequest)
+              .toHaveBeenCalledWith('cenc', initData4);
+        });
+
+    it('requests every registered key when asked without key IDs',
+        async () => {
+          setupThreeKeys();
+          await initAndAttach();
+
+          drmEngine.ensureKeysAvailable([]);
+          expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(1);
+          expect(session1.generateRequest)
+              .toHaveBeenCalledWith('cenc', initData1);
+
+          setStatuses(session1, {1: 'usable'});
+          sendMessage(session1);
+          session1.on['keystatuseschange']({target: session1});
+          await Util.shortDelay();
+          expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(2);
+          expect(session2.generateRequest)
+              .toHaveBeenCalledWith('cenc', initData2);
+
+          setStatuses(session2, {2: 'usable'});
+          sendMessage(session2);
+          session2.on['keystatuseschange']({target: session2});
+          await Util.shortDelay();
+          expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(3);
+          expect(session3.generateRequest)
+              .toHaveBeenCalledWith('cenc', initData3);
+
+          setStatuses(session3, {3: 'usable'});
+          sendMessage(session3);
+          session3.on['keystatuseschange']({target: session3});
+          await Util.shortDelay();
+
+          expect(fakeNetEngine.request).toHaveBeenCalledTimes(3);
+          expect(onKeyStatusSpy).toHaveBeenCalledTimes(1);
+          expect(onKeyStatusSpy).toHaveBeenCalledWith({
+            [kid(1)]: 'usable',
+            [kid(2)]: 'usable',
+            [kid(3)]: 'usable',
+          });
+        });
+
+    it('marks a key the license did not include as unavailable', async () => {
+      setupThreeKeys();
+      await initAndAttach();
+
+      drmEngine.ensureKeysAvailable([kid(3)]);
+
+      // The license brought key 1 instead.
+      setStatuses(session1, {1: 'usable'});
+      sendMessage(session1);
+      session1.on['keystatuseschange']({target: session1});
+      await Util.shortDelay();
+
+      expect(drmEngine.isKeyUnavailable(kid(3))).toBe(true);
+      expect(drmEngine.isKeyUnavailable(kid(1))).toBe(false);
+      expect(drmEngine.hasUnavailableKeys()).toBe(true);
+      expect(onKeyStatusSpy).toHaveBeenCalledTimes(1);
+      expect(onKeyStatusSpy).toHaveBeenCalledWith({[kid(1)]: 'usable'});
+
+      // Not requested again.
+      drmEngine.ensureKeysAvailable([kid(3)]);
+      drmEngine.newInitData('cenc', initData3, kid(3));
+      expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(1);
+    });
+
+    it('announces an unavailable key even without any key status',
+        async () => {
+          // The CDM reports nothing, but the license (Widevine) shows which
+          // keys it carried.
+          fakeNetEngine.setResponseValue(
+              'http://abc.drm/license', widevineLicense([1]));
+          setupThreeKeys();
+          await initAndAttach();
+
+          drmEngine.ensureKeysAvailable([kid(3)]);
+          sendMessage(session1);
+          await Util.shortDelay();
+
+          expect(drmEngine.isKeyUnavailable(kid(3))).toBe(true);
+          // Right away, without waiting for the session load timeout.
+          expect(onKeyStatusSpy).toHaveBeenCalledTimes(1);
+          expect(onKeyStatusSpy).toHaveBeenCalledWith({});
+          expect(drmEngine.hasPendingLicenseRequests()).toBe(false);
+        });
+
+    it('cannot tell which keys came when nothing reports them', async () => {
+      window.shakaMediaKeysPolyfill = true;
+      config.singleLicenseRequestBlindMode = true;
+      drmEngine.configure(config);
+
+      setupThreeKeys();
+      await initAndAttach();
+
+      drmEngine.ensureKeysAvailable([kid(3)]);
+      setSyntheticStatus(session1);
+      sendMessage(session1);
+      session1.on['keystatuseschange']({target: session1});
+      await Util.shortDelay();
+
+      // Synthetic statuses and an unparseable license: the key is assumed to
+      // have come.
+      expect(drmEngine.isKeyUnavailable(kid(3))).toBe(false);
+      expect(drmEngine.hasUnavailableKeys()).toBe(false);
+      drmEngine.ensureKeysAvailable([kid(3)]);
+      expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(1);
+
+      // Another key still has to be requested.
+      drmEngine.ensureKeysAvailable([kid(2)]);
+      expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(2);
+      expect(session2.generateRequest)
+          .toHaveBeenCalledWith('cenc', initData2);
+    });
+
+    it('marks a key refused by the server as unavailable', async () => {
+      setupThreeKeys();
+      await initAndAttach();
+
+      drmEngine.ensureKeysAvailable([kid(3)]);
+      drmEngine.ensureKeysAvailable([kid(2)]);
+
+      const netError = new shaka.util.Error(
+          shaka.util.Error.Severity.CRITICAL,
+          shaka.util.Error.Category.NETWORK,
+          shaka.util.Error.Code.BAD_HTTP_STATUS,
+          'http://abc.drm/license', 400);
+      fakeNetEngine.request.and.returnValue(
+          shaka.util.AbortableOperation.failed(netError));
+
+      sendMessage(session1);
+      await Util.shortDelay();
+
+      // Not fatal: another key is waiting.  The refused key is not asked for
+      // again, the waiting one gets its request.
+      expect(onErrorSpy).not.toHaveBeenCalled();
+      expect(drmEngine.isKeyUnavailable(kid(3))).toBe(true);
+      expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(2);
+      expect(session2.generateRequest)
+          .toHaveBeenCalledWith('cenc', initData2);
+      drmEngine.ensureKeysAvailable([kid(3)]);
+      expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(2);
+
+      fakeNetEngine.request.and.returnValue(
+          shaka.util.AbortableOperation.completed({data: new Uint8Array(0)}));
+      setStatuses(session2, {2: 'usable'});
+      sendMessage(session2);
+      session2.on['keystatuseschange']({target: session2});
+      await Util.shortDelay();
+
+      expect(onKeyStatusSpy).toHaveBeenCalledTimes(1);
+      expect(onKeyStatusSpy).toHaveBeenCalledWith({[kid(2)]: 'usable'});
+    });
+
+    it('fails when the only requested key is refused', async () => {
+      onErrorSpy.and.stub();
+      setupThreeKeys();
+      await initAndAttach();
+
+      drmEngine.ensureKeysAvailable([kid(3)]);
+
+      const netError = new shaka.util.Error(
+          shaka.util.Error.Severity.CRITICAL,
+          shaka.util.Error.Category.NETWORK,
+          shaka.util.Error.Code.BAD_HTTP_STATUS,
+          'http://abc.drm/license', 400);
+      fakeNetEngine.request.and.returnValue(
+          shaka.util.AbortableOperation.failed(netError));
+
+      sendMessage(session1);
+      await Util.shortDelay();
+
+      expect(onErrorSpy).toHaveBeenCalledTimes(1);
+      expect(onErrorSpy.calls.argsFor(0)[0].code)
+          .toBe(shaka.util.Error.Code.LICENSE_REQUEST_FAILED);
+    });
+
+    it('requests a key again after a transient failure when asked',
+        async () => {
+          setupThreeKeys();
+          await initAndAttach();
+
+          drmEngine.ensureKeysAvailable([kid(1)]);
+          drmEngine.ensureKeysAvailable([kid(2)]);
+
+          const netError = new shaka.util.Error(
+              shaka.util.Error.Severity.RECOVERABLE,
+              shaka.util.Error.Category.NETWORK,
+              shaka.util.Error.Code.HTTP_ERROR,
+              'http://abc.drm/license');
+          fakeNetEngine.request.and.returnValue(
+              shaka.util.AbortableOperation.failed(netError));
+
+          sendMessage(session1);
+          await Util.shortDelay();
+
+          // Key 1 was not refused by the server.
+          expect(drmEngine.isKeyUnavailable(kid(1))).toBe(false);
+          expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(2);
+          expect(session2.generateRequest)
+              .toHaveBeenCalledWith('cenc', initData2);
+
+          fakeNetEngine.request.and.returnValue(
+              shaka.util.AbortableOperation.completed(
+                  {data: new Uint8Array(0)}));
+          setStatuses(session2, {2: 'usable'});
+          sendMessage(session2);
+          session2.on['keystatuseschange']({target: session2});
+          await Util.shortDelay();
+
+          // Asking for it again (e.g. after a seek) gives it a new request.
+          drmEngine.ensureKeysAvailable([kid(1)]);
+          expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(3);
+          expect(session3.generateRequest)
+              .toHaveBeenCalledWith('cenc', initData1);
+        });
+
+    it('requests a key again once it has expired', async () => {
+      setupThreeKeys();
+      await initAndAttach();
+
+      drmEngine.ensureKeysAvailable([kid(1)]);
+      setStatuses(session1, {1: 'usable'});
+      sendMessage(session1);
+      session1.on['keystatuseschange']({target: session1});
+      await Util.shortDelay();
+      expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(1);
+
+      // The license expires: the only key we hold is now 'expired', which
+      // the engine reports as an error, as it always did.
+      onErrorSpy.and.stub();
+      setStatuses(session1, {1: 'expired'});
+      session1.on['keystatuseschange']({target: session1});
+      await Util.shortDelay();
+      expect(onErrorSpy).toHaveBeenCalledTimes(1);
+      expect(onErrorSpy.calls.argsFor(0)[0].code)
+          .toBe(shaka.util.Error.Code.EXPIRED);
+
+      // Needing the key again gets it a new license.
+      drmEngine.ensureKeysAvailable([kid(1)]);
+      expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(2);
+      expect(session2.generateRequest)
+          .toHaveBeenCalledWith('cenc', initData1);
+
+      setStatuses(session2, {1: 'usable'});
+      sendMessage(session2);
+      session2.on['keystatuseschange']({target: session2});
+      await Util.shortDelay();
+      expect(onKeyStatusSpy).toHaveBeenCalledWith({[kid(1)]: 'usable'});
+
+      drmEngine.ensureKeysAvailable([kid(1)]);
+      expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(2);
+    });
+
+    it('ignores re-registrations of known init data', async () => {
+      setupThreeKeys();
+      await initAndAttach();
+
+      // As the manifest refreshes would do.
+      for (let i = 0; i < 5; i++) {
+        drmEngine.newInitData('cenc', initData1, kid(1));
+        drmEngine.newInitData('cenc', initData2, kid(2));
+        drmEngine.newInitData('cenc', initData3, kid(3));
+      }
+      expect(mockMediaKeys.createSession).not.toHaveBeenCalled();
+
+      drmEngine.ensureKeysAvailable([kid(2)]);
+      expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(1);
+      expect(session1.generateRequest)
+          .toHaveBeenCalledWith('cenc', initData2);
+
+      setStatuses(session1, {2: 'usable'});
+      sendMessage(session1);
+      session1.on['keystatuseschange']({target: session1});
+      await Util.shortDelay();
+
+      drmEngine.newInitData('cenc', initData2, kid(2));
+      drmEngine.ensureKeysAvailable([kid(2)]);
+      expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(1);
+    });
+
+    it('withholds key status announcements while a key is queued',
+        async () => {
+          setupThreeKeys();
+          await initAndAttach();
+
+          drmEngine.ensureKeysAvailable([kid(1)]);
+          drmEngine.ensureKeysAvailable([kid(2)]);
+
+          setStatuses(session1, {1: 'usable', 2: 'usable'});
+          session1.on['keystatuseschange']({target: session1});
+          await Util.shortDelay();
+
+          expect(onKeyStatusSpy).not.toHaveBeenCalled();
+
+          sendMessage(session1);
+          await Util.shortDelay();
+
+          expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(1);
+          expect(onKeyStatusSpy).toHaveBeenCalledTimes(1);
+        });
+
+    it('releases the gate when the license is rejected', async () => {
+      onErrorSpy.and.stub();
+      setupThreeKeys();
+      await initAndAttach();
+
+      drmEngine.ensureKeysAvailable([kid(1)]);
+      drmEngine.ensureKeysAvailable([kid(2)]);
+
+      session1.update.and.returnValue(Promise.reject(new Error('nope')));
+      sendMessage(session1);
+      await Util.shortDelay();
+
+      expect(onErrorSpy).toHaveBeenCalled();
+      expect(onErrorSpy.calls.argsFor(0)[0].code)
+          .toBe(shaka.util.Error.Code.LICENSE_RESPONSE_REJECTED);
+      expect(session1.close).toHaveBeenCalled();
+      expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(2);
+      expect(session2.generateRequest)
+          .toHaveBeenCalledWith('cenc', initData2);
+    });
+
+    it('releases the gate when generateRequest fails', async () => {
+      onErrorSpy.and.stub();
+      setupThreeKeys();
+      session1.generateRequest.and.returnValue(
+          Promise.reject(new Error('nope')));
+      await initAndAttach();
+
+      drmEngine.ensureKeysAvailable([kid(1)]);
+      drmEngine.ensureKeysAvailable([kid(2)]);
+      await Util.shortDelay();
+
+      expect(onErrorSpy).toHaveBeenCalled();
+      expect(onErrorSpy.calls.argsFor(0)[0].code)
+          .toBe(shaka.util.Error.Code.FAILED_TO_GENERATE_LICENSE_REQUEST);
+      expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(2);
+      expect(session2.generateRequest)
+          .toHaveBeenCalledWith('cenc', initData2);
+    });
+
+    it('keeps the gate across individualization requests', async () => {
+      setupThreeKeys();
+      await initAndAttach();
+
+      drmEngine.ensureKeysAvailable([kid(1)]);
+      drmEngine.ensureKeysAvailable([kid(2)]);
+
+      sendMessage(session1, 'individualization-request');
+      await Util.shortDelay();
+
+      setStatuses(session1, {1: 'usable', 2: 'usable'});
+      session1.on['keystatuseschange']({target: session1});
+      await Util.shortDelay();
+
+      // Still gated: the queue has not been drained, so nothing is announced.
+      expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(1);
+      expect(onKeyStatusSpy).not.toHaveBeenCalled();
+
+      sendMessage(session1, 'license-request');
+      await Util.shortDelay();
+
+      expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(1);
+      expect(onKeyStatusSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not touch the gate on license renewals', async () => {
+      setupThreeKeys();
+      await initAndAttach();
+
+      drmEngine.ensureKeysAvailable([kid(1)]);
+      setStatuses(session1, {1: 'usable'});
+      sendMessage(session1);
+      session1.on['keystatuseschange']({target: session1});
+      await Util.shortDelay();
+
+      // Session 2 (key 2) is now in flight, key 3 waits for it.
+      drmEngine.ensureKeysAvailable([kid(2)]);
+      drmEngine.ensureKeysAvailable([kid(3)]);
+      expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(2);
+      expect(session2.generateRequest)
+          .toHaveBeenCalledWith('cenc', initData2);
+
+      // A renewal on the first session is just another request.
+      sendMessage(session1, 'license-renewal');
+      await Util.shortDelay();
+
+      expect(fakeNetEngine.request).toHaveBeenCalledTimes(2);
+      expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(2);
+
+      // Session 2 settles and brings key 3 with it.
+      setStatuses(session2, {2: 'usable', 3: 'usable'});
+      sendMessage(session2);
+      session2.on['keystatuseschange']({target: session2});
+      await Util.shortDelay();
+
+      expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(2);
+      expect(fakeNetEngine.request).toHaveBeenCalledTimes(3);
+    });
+
+    it('waits for play when delayLicenseRequestUntilPlayed is set',
+        async () => {
+          config.delayLicenseRequestUntilPlayed = true;
+          drmEngine.configure(config);
+          mockVideo.paused = true;
+
+          setupThreeKeys();
+          await initAndAttach();
+
+          drmEngine.ensureKeysAvailable([kid(1)]);
+          expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(1);
+          setStatuses(session1, {1: 'usable'});
+          sendMessage(session1);
+          await Util.shortDelay();
+          expect(fakeNetEngine.request).not.toHaveBeenCalled();
+
+          mockVideo.on['play']();
+          await Util.shortDelay();
+
+          expect(fakeNetEngine.request).toHaveBeenCalledTimes(1);
+          expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(1);
+        });
+
+    it('makes one request for new keys after rotation', async () => {
+      setupThreeKeys();
+      await initAndAttach();
+
+      drmEngine.ensureKeysAvailable([kid(1)]);
+      setStatuses(session1, {1: 'usable'});
+      sendMessage(session1);
+      session1.on['keystatuseschange']({target: session1});
+      await Util.shortDelay();
+      expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(1);
+
+      // Two new keys show up in the manifest at once: nothing happens until
+      // one of them is needed.
+      const initData5 = new Uint8Array([5]);
+      const initData6 = new Uint8Array([6]);
+      drmEngine.newInitData('cenc', initData5, kid(5));
+      drmEngine.newInitData('cenc', initData6, kid(6));
+      expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(1);
+
+      drmEngine.ensureKeysAvailable([kid(5)]);
+      expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(2);
+      expect(session2.generateRequest)
+          .toHaveBeenCalledWith('cenc', initData5);
+
+      setStatuses(session2, {5: 'usable', 6: 'usable'});
+      sendMessage(session2);
+      session2.on['keystatuseschange']({target: session2});
+      await Util.shortDelay();
+
+      // Key 6 came with it: no request when it is needed.
+      drmEngine.ensureKeysAvailable([kid(6)]);
+      drmEngine.ensureKeysAvailable([kid(5)]);
+      expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(2);
+      expect(fakeNetEngine.request).toHaveBeenCalledTimes(2);
+    });
+
+    it('serializes init data without key IDs', async () => {
+      await initAndAttach();
+
+      await sendEncryptedEvent('cenc', new Uint8Array([9]));
+      await sendEncryptedEvent('cenc', new Uint8Array([10]));
+
+      expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(1);
+
+      sendMessage(session1);
+      await Util.shortDelay();
+
+      expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(2);
+      expect(session2.generateRequest)
+          .toHaveBeenCalledWith('cenc', new Uint8Array([10]));
+    });
+
+    it('does not apply to offline storage', async () => {
+      tweakDrmInfos((drmInfos) => {
+        drmInfos[0].initData = [
+          {initData: initData1, initDataType: 'cenc', keyId: kid(1)},
+          {initData: initData2, initDataType: 'cenc', keyId: kid(2)},
+        ];
+      });
+
+      await drmEngine.initForStorage(
+          manifest.variants, /* usePersistentLicenses= */ false);
+      // Sessions are created synchronously; the returned promise only
+      // resolves once they are loaded, which never happens with these mocks.
+      drmEngine.createOrLoad().catch(() => {});
+
+      expect(drmEngine.isOnDemandKeyMode()).toBe(false);
+      expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(2);
+    });
+
+    it('is not applied on polyfilled EME without blind mode', async () => {
+      window.shakaMediaKeysPolyfill = true;
+      setupThreeKeys();
+      await initAndAttach();
+
+      expect(drmEngine.isOnDemandKeyMode()).toBe(false);
+      expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(3);
+    });
+
+    it('falls back when the CDM reports synthetic key statuses', async () => {
+      setupThreeKeys();
+      await initAndAttach();
+
+      drmEngine.ensureKeysAvailable([kid(3)]);
+      expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(1);
+
+      setSyntheticStatus(session1);
+      sendMessage(session1);
+      session1.on['keystatuseschange']({target: session1});
+      await Util.shortDelay();
+
+      // Every registered key got its own session right away.
+      expect(drmEngine.isOnDemandKeyMode()).toBe(false);
+      expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(3);
+      expect(session2.generateRequest)
+          .toHaveBeenCalledWith('cenc', initData1);
+      expect(session3.generateRequest)
+          .toHaveBeenCalledWith('cenc', initData2);
+
+      // And new init data is no longer registered but requested.
+      drmEngine.newInitData('cenc', initData4, kid(4));
+      expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(4);
+    });
+
+    it('uses the keys of the license response in blind mode', async () => {
+      window.shakaMediaKeysPolyfill = true;
+      config.singleLicenseRequestBlindMode = true;
+      drmEngine.configure(config);
+      fakeNetEngine.setResponseValue(
+          'http://abc.drm/license', widevineLicense([1, 2]));
+
+      setupThreeKeys();
+      await initAndAttach();
+      expect(drmEngine.isOnDemandKeyMode()).toBe(true);
+      expect(mockMediaKeys.createSession).not.toHaveBeenCalled();
+
+      drmEngine.ensureKeysAvailable([kid(1)]);
+      drmEngine.ensureKeysAvailable([kid(2)]);
+      expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(1);
+
+      setSyntheticStatus(session1);
+      sendMessage(session1);
+      session1.on['keystatuseschange']({target: session1});
+      await Util.shortDelay();
+
+      // Key 2 came in the license: no new session.  The delivered keys are
+      // reported as usable next to the synthetic status.
+      expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(1);
+      expect(fakeNetEngine.request).toHaveBeenCalledTimes(1);
+      expect(onKeyStatusSpy).toHaveBeenCalledTimes(1);
+      expect(onKeyStatusSpy).toHaveBeenCalledWith({
+        '00': 'usable',
+        [kid(1)]: 'usable',
+        [kid(2)]: 'usable',
+      });
+
+      // A key the license did not bring is unavailable.
+      drmEngine.ensureKeysAvailable([kid(3)]);
+      expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(2);
+      setSyntheticStatus(session2);
+      sendMessage(session2);
+      session2.on['keystatuseschange']({target: session2});
+      await Util.shortDelay();
+      expect(drmEngine.isKeyUnavailable(kid(3))).toBe(true);
+      drmEngine.ensureKeysAvailable([kid(3)]);
+      expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(2);
+    });
+  });  // describe('singleLicenseRequest')
 
   describe('isPlayReadyKeySystem', () => {
     it('should return true for MS & Chromecast PlayReady', () => {

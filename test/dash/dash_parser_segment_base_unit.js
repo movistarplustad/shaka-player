@@ -136,6 +136,41 @@ describe('DashParser SegmentBase', () => {
         'http://example.com', 100, 200, /* isInit= */ false);
   });
 
+  it('carries the default key ID on the init segment', async () => {
+    const source = [
+      '<MPD mediaPresentationDuration="PT75S"',
+      '    xmlns:cenc="urn:mpeg:cenc:2013">',
+      '  <Period>',
+      '    <BaseURL>http://example.com</BaseURL>',
+      '    <SegmentBase indexRange="100-200" timescale="9000">',
+      '      <Initialization sourceURL="init.mp4" range="201-300" />',
+      '    </SegmentBase>',
+      '    <AdaptationSet mimeType="video/mp4">',
+      '      <ContentProtection',
+      '          schemeIdUri="urn:mpeg:dash:mp4protection:2011" value="cenc"',
+      '          cenc:default_KID="DEADBEEF-FEED-BAAD-F00D-000008675309" />',
+      '      <ContentProtection schemeIdUri=',
+      '          "urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed" />',
+      '      <Representation bandwidth="1" />',
+      '    </AdaptationSet>',
+      '  </Period>',
+      '</MPD>',
+    ].join('\n');
+
+    fakeNetEngine
+        .setResponseText('dummy://foo', source)
+        .setResponseValue('http://example.com', indexSegment);
+
+    /** @type {shaka.extern.Manifest} */
+    const manifest = await parser.start('dummy://foo', playerInterface);
+    const segmentReference = await Dash.getFirstVideoSegmentReference(manifest);
+    const initSegmentReference = segmentReference.initSegmentReference;
+    expect(initSegmentReference.getUris()).toEqual(
+        ['http://example.com/init.mp4']);
+    expect(initSegmentReference.keyIds)
+        .toEqual(['deadbeeffeedbaadf00d000008675309']);
+  });
+
   it('inherits from AdaptationSet', async () => {
     const source = [
       '<MPD mediaPresentationDuration="PT75S">',

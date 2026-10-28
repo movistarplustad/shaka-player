@@ -41,10 +41,14 @@ shaka.test.FakeDrmEngine = class {
 
     /** @type {!jasmine.Spy} */
     this.newInitData = jasmine.createSpy('newInitData');
-    this.newInitData.and.callFake((initDataType, initData) => {
+    this.newInitData.and.callFake((initDataType, initData, keyId) => {
       const num = 1 + this.offlineSessions_.length;
       this.offlineSessions_.push('session-' + num);
     });
+
+    /** @type {!jasmine.Spy} */
+    this.getMediaKeys = jasmine.createSpy('getMediaKeys');
+    this.getMediaKeys.and.returnValue(null);
 
     /** @type {!jasmine.Spy} */
     this.getExpiration = jasmine.createSpy('getExpiration');
@@ -84,6 +88,30 @@ shaka.test.FakeDrmEngine = class {
 
     /** @type {!jasmine.Spy} */
     this.setSrcEquals = jasmine.createSpy('setSrcEquals');
+
+    /** @type {!jasmine.Spy} */
+    this.setLicenceRequiredCallback =
+        jasmine.createSpy('setLicenceRequiredCallback');
+
+    /** @type {!jasmine.Spy} */
+    this.hasPendingLicenseRequests =
+        jasmine.createSpy('hasPendingLicenseRequests');
+    this.hasPendingLicenseRequests.and.returnValue(false);
+
+    /** @type {!jasmine.Spy} */
+    this.isOnDemandKeyMode = jasmine.createSpy('isOnDemandKeyMode');
+    this.isOnDemandKeyMode.and.returnValue(false);
+
+    /** @type {!jasmine.Spy} */
+    this.ensureKeysAvailable = jasmine.createSpy('ensureKeysAvailable');
+
+    /** @type {!jasmine.Spy} */
+    this.isKeyUnavailable = jasmine.createSpy('isKeyUnavailable');
+    this.isKeyUnavailable.and.returnValue(false);
+
+    /** @type {!jasmine.Spy} */
+    this.hasUnavailableKeys = jasmine.createSpy('hasUnavailableKeys');
+    this.hasUnavailableKeys.and.returnValue(false);
   }
 
   /**
