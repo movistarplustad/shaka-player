@@ -2777,6 +2777,21 @@ describe('DrmEngine', () => {
       expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(2);
     });
 
+    it('ignores the legacy licence-required callback', async () => {
+      const callback = jasmine.createSpy('licenceRequiredCallback');
+      callback.and.returnValue([true, false]);  // "don't request"
+      drmEngine.setLicenceRequiredCallback(
+          shaka.test.Util.spyFunc(callback));
+      setupThreeKeys();
+      await initAndAttach();
+
+      drmEngine.ensureKeysAvailable([kid(1)]);
+      expect(callback).not.toHaveBeenCalled();
+      expect(mockMediaKeys.createSession).toHaveBeenCalledTimes(1);
+      expect(session1.generateRequest)
+          .toHaveBeenCalledWith('cenc', initData1);
+    });
+
     it('ignores re-registrations of known init data', async () => {
       setupThreeKeys();
       await initAndAttach();

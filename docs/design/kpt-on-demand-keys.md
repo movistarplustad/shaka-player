@@ -33,7 +33,7 @@ Nagra's written specification ("now + 24 h", "past up to now + 24 h") does not m
 
 Always excluded from the mode: Tizen 2 and offline storage (`initForStorage`). If a native-EME platform turns out to report synthetic key statuses, the engine falls back to the classic behaviour for that playback (`fallbackToLegacy_`).
 
-The fork's `player.setLicenceRequiredCallback()` API is kept for compatibility; the new mode makes it unnecessary.
+The fork's `player.setLicenceRequiredCallback(cb)` API is now **deprecated** (`@deprecated`, with a deprecation warning in the console when registered) but keeps working exactly as before, so applications that still call it do not break: for every init data about to be requested, `cb(pssh, keyStatuses)` returns `[force, request]`; with `force` false the player decides as usual, `[true, false]` drops the init data and `[true, true]` requests it bypassing the deduplication. With `drm.singleLicenseRequest` set to `true` the callback is **ignored** (the DrmEngine logs a warning when it is registered): the on-demand mode already decides per key ID what to request, and a callback that dropped the current period's key would leave the video waiting for a key. With the flag `false` it keeps working as before. New applications should use `drm.singleLicenseRequest` only.
 
 ## 3. Flow
 

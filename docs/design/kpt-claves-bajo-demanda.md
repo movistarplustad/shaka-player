@@ -33,7 +33,7 @@ La especificación escrita de Nagra ("now + 24 h", "pasado hasta now + 24 h") no
 
 Siempre excluidos del modo: Tizen 2 y el almacenamiento offline (`initForStorage`). Si en una plataforma con EME nativo el CDM resulta dar estados sintéticos, el motor vuelve al comportamiento clásico para esa reproducción (`fallbackToLegacy_`).
 
-La API del fork `player.setLicenceRequiredCallback()` se mantiene por compatibilidad; el modo nuevo la hace innecesaria.
+La API del fork `player.setLicenceRequiredCallback(cb)` queda **obsoleta** (`@deprecated`, con aviso de deprecación en consola al registrarla) pero sigue funcionando igual que antes, para no romper las aplicaciones que aún la llaman: por cada initData que va a pedirse, `cb(pssh, keyStatuses)` devuelve `[force, request]`; con `force` a `false` el player decide como siempre, con `[true, false]` descarta el initData y con `[true, true]` lo pide saltándose la deduplicación. Con `drm.singleLicenseRequest` a `true` el callback **se ignora** (el DrmEngine avisa por consola al registrarlo): el modo bajo demanda ya decide por KID qué pedir, y un callback que descartara la clave del periodo en curso dejaría el vídeo esperando clave. Con el flag a `false` sigue funcionando como siempre. Las aplicaciones nuevas deben usar solo `drm.singleLicenseRequest`.
 
 ## 3. Flujo
 
